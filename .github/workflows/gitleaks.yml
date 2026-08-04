@@ -40,8 +40,23 @@ on:
         required: false
         type: string
         default: "."
-# Reusable workflows declare the *minimum* permissions every caller
-# must grant.
+    secrets:
+      GH_APP_SECURITY_GH_CID:
+        description: >-
+          Client ID of the GitHub App used to mint a short-lived,
+          security-events-scoped installation token for the calling repo.
+          Only required when `report_formats` produces a SARIF report;
+          omit both secrets entirely for CSV/JSON/JUnit-only scans (e.g.
+          PR-side scans that shouldn't need any secrets at all).
+        required: false
+      GH_APP_SECURITY_GH_PRIVATE_KEY:
+        description: >-
+          Private key of the same GitHub App. See GH_APP_SECURITY_GH_CID.
+        required: false
+# No caller needs to grant `security-events: write` (or any permission
+# beyond the `contents: read` needed to check out its own code): SARIF
+# uploads authenticate as the security-gh GitHub App installation token
+# instead of the ambient GITHUB_TOKEN, scoped fresh to each call.
 permissions:
   contents: read
 
@@ -77,11 +92,21 @@ jobs:
           GITLEAKS_SOURCE_DIR: ${{ inputs.scan_path }}
         run: python build_tools/scan_tools/github_actions/gitleaks.py
 
+      - name: Mint security-events token
+        if: always() && steps.scan.outputs.sarif_path != ''
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.GH_APP_SECURITY_GH_CID }}
+          private-key: ${{ secrets.GH_APP_SECURITY_GH_PRIVATE_KEY }}
+          permission-security-events: write
+
       - name: Upload SARIF report to code scanning
         if: always() && steps.scan.outputs.sarif_path != ''
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           sarif_file: ${{ steps.scan.outputs.sarif_path }}
+          token: ${{ steps.app-token.outputs.token }}
           category: gitleaks
 
       - name: Upload non-SARIF reports
