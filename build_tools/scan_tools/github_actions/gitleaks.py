@@ -12,6 +12,10 @@ Exit codes:
 
 Inputs come from CLI flags or matching `GITLEAKS_*` env vars set by the
 workflow.
+
+`gha_*` helpers (`gha_load_github_event`, `gha_set_output`,
+`gha_append_step_summary`) live in ROCm/TheRock's `github_actions_api`
+module rather than being duplicated here; see `_import_github_actions_api`.
 """
 
 import argparse
@@ -25,23 +29,54 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import NamedTuple, TypedDict, cast
 from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-# Add build_tools to path for github_actions imports.
-sys.path.insert(0, str(REPO_ROOT / "build_tools"))
-from github_actions.github_actions_api import (  # noqa: E402
-    gha_append_step_summary,
-    gha_load_github_event,
-    gha_set_output,
-)
-
 log = logging.getLogger(__name__)
+
+
+class _GithubActionsApi(NamedTuple):
+    """The subset of ROCm/TheRock's `github_actions_api` module this script uses."""
+
+    append_step_summary: Callable[[str], None]
+    load_github_event: Callable[[], Mapping[str, object]]
+    set_output: Callable[[Mapping[str, str]], None]
+
+
+def _import_github_actions_api() -> _GithubActionsApi:
+    """Import `gha_*` helpers from ROCm/TheRock's `github_actions_api` module.
+
+    Deferred (rather than a module-level import) so unit tests exercising
+    this module's pure scan/parsing logic don't need a TheRock checkout;
+    only `main()` needs these. The workflow checks out TheRock and points
+    THEROCK_BUILD_TOOLS_DIR at its `build_tools/` directory before running
+    this script.
+    """
+    therock_build_tools = os.environ.get("THEROCK_BUILD_TOOLS_DIR")
+    if not therock_build_tools:
+        raise RuntimeError(
+            "THEROCK_BUILD_TOOLS_DIR is not set; expected the workflow to "
+            "check out ROCm/TheRock and point this at its build_tools/ dir."
+        )
+    if therock_build_tools not in sys.path:
+        sys.path.insert(0, therock_build_tools)
+    from github_actions.github_actions_api import (
+        gha_append_step_summary,
+        gha_load_github_event,
+        gha_set_output,
+    )
+
+    return _GithubActionsApi(
+        append_step_summary=gha_append_step_summary,
+        load_github_event=gha_load_github_event,
+        set_output=gha_set_output,
+    )
+
 
 # Keep in sync with the `report_formats` input in
 # `.github/workflows/gitleaks.yml`.
@@ -230,12 +265,20 @@ def _resolve_config_path() -> str:
 
 
 def _determine_log_opts(
-    scan_mode: str, event_name: str, event: GitHubEventPayload
+    scan_mode: str,
+    event_name: str,
+    event: GitHubEventPayload,
+    source_dir: Path = Path("."),
 ) -> str:
     """Build the `--log-opts` value for `gitleaks detect`.
 
     Returns '' to scan the full history; otherwise returns a git range
     derived from the triggering event or raises when unavailable.
+
+    `source_dir` is the scan target's git checkout; the `pull_request`
+    branch below runs `git` there explicitly (rather than relying on this
+    process's cwd) since the scan target isn't always checked out at cwd
+    (e.g. when this script's own repo is checked out at cwd instead).
     """
     if scan_mode == "all":
         return ""
@@ -255,6 +298,7 @@ def _determine_log_opts(
         head_sha = pr["head"]["sha"]
         fetch_result = subprocess.run(
             ["git", "fetch", "--no-tags", "--depth=1", "origin", base_sha],
+            cwd=source_dir,
             check=False,
             capture_output=True,
             text=True,
@@ -268,6 +312,7 @@ def _determine_log_opts(
             )
         rev_parse = subprocess.run(
             ["git", "rev-parse", "--verify", f"{base_sha}^{{commit}}"],
+            cwd=source_dir,
             check=False,
             capture_output=True,
             text=True,
@@ -473,7 +518,10 @@ def _md_code_fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
-def _emit_non_sarif_reports(non_sarif: list[_ReportTarget]) -> None:
+def _emit_non_sarif_reports(
+    non_sarif: list[_ReportTarget],
+    gha_append_step_summary: Callable[[str], None],
+) -> None:
     """Surface each non-SARIF report in the workflow run."""
     summary_chunks: list[str] = []
     for target in non_sarif:
@@ -534,6 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
+    gha = _import_github_actions_api()
     args = build_parser().parse_args(argv)
 
     try:
@@ -553,11 +602,12 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha_load_github_event()
+        event = gha.load_github_event()
         log_opts = _determine_log_opts(
             scan_mode=args.scan_mode,
             event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
             event=event,
+            source_dir=source_dir,
         )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
@@ -571,7 +621,7 @@ def main(argv: list[str]) -> int:
 
     sarif_target = next((t for t in targets if t.fmt == "sarif"), None)
     non_sarif = [t for t in targets if t.fmt != "sarif"]
-    gha_set_output(
+    gha.set_output(
         {
             "sarif_path": "" if sarif_target is None else str(sarif_target.path),
             "non_sarif_paths": "\n".join(str(t.path) for t in non_sarif),
@@ -589,10 +639,10 @@ def main(argv: list[str]) -> int:
         )
     except RuntimeError as exc:
         log.error("%s", exc)
-        _emit_non_sarif_reports(non_sarif)
+        _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2
 
-    _emit_non_sarif_reports(non_sarif)
+    _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
 
     if leaks_found:
         log.error("gitleaks found one or more potential secrets; see report artifacts")

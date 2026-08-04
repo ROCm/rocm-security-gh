@@ -5,6 +5,7 @@ from pathlib import Path
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 import compute_pr_depth
@@ -64,6 +65,21 @@ class ComputeFetchDepthTest(unittest.TestCase):
     def test_returns_string(self):
         result = compute_pr_depth.compute_fetch_depth({"pull_request": {"commits": 2}})
         self.assertIsInstance(result, str)
+
+
+class MainTest(unittest.TestCase):
+    """Tests for compute_pr_depth.main's TheRock dependency handling."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("THEROCK_BUILD_TOOLS_DIR", None)
+
+    def test_raises_when_therock_build_tools_dir_unset(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            compute_pr_depth.main([])
+        self.assertIn("THEROCK_BUILD_TOOLS_DIR", str(ctx.exception))
 
 
 if __name__ == "__main__":

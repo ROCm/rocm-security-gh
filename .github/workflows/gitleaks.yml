@@ -66,44 +66,70 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Bootstrap checkout
+      # This job checks out *two* repos: this workflow's own repo (tooling:
+      # gitleaks.py, gitleaks.toml) at $GITHUB_WORKSPACE root, and the scan
+      # target (the calling repo) into a side directory below. They can't
+      # share the workspace root: actions/checkout wipes the *entire*
+      # workspace the first time it checks out a path with no pre-existing
+      # `.git` there (regardless of `clean:`), so whichever repo lands at
+      # root has to be checked out exactly once and first.
+      #
+      # Tooling goes at root (not the scan target) because `uses: ./path`
+      # local action/workflow references -- used elsewhere in this repo's
+      # workflows -- resolve relative to $GITHUB_WORKSPACE on disk, not to
+      # this repo automatically.
+      - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # job.workflow_repository / job.workflow_sha identify the repo
+          # and exact commit that *this* reusable workflow file was called
+          # at/from, regardless of which repo called it.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Checkout TheRock's github_actions_api helper
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gha_load_github_event/gha_set_output/gha_append_step_summary
+          # are owned by TheRock, not duplicated here; sparse-checkout
+          # keeps this fast since TheRock is a large repo and only this
+          # one file is needed.
+          repository: ROCm/TheRock
+          ref: main
           fetch-depth: 1
+          sparse-checkout: |
+            build_tools/github_actions/github_actions_api.py
+          sparse-checkout-cone-mode: false
+          path: .therock
+          persist-credentials: false
 
       - name: Compute checkout fetch-depth
         id: depth
-        uses: ./.github/actions/compute_pr_fetch_depth
+        run: python build_tools/github_actions/compute_pr_depth.py
+        env:
+          THEROCK_BUILD_TOOLS_DIR: ${{ github.workspace }}/.therock/build_tools
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout scan target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: ${{ steps.depth.outputs.value }}
+          path: .scan-target
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
-      - name: Checkout security-gh scan tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The two checkout steps above bring in the *calling* repo (the
-          # scan target) at $GITHUB_WORKSPACE. gitleaks.py, gitleaks.toml,
-          # and their helper modules only live in this repo, so fetch
-          # this workflow's own repo/commit into a side directory rather
-          # than assuming the caller's checkout happens to contain them.
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .rocm-security-gh
-          persist-credentials: false
-
       - name: Run gitleaks
         id: scan
         env:
           GITLEAKS_SCAN_MODE: ${{ inputs.scan_mode }}
           GITLEAKS_REPORT_FORMATS: ${{ inputs.report_formats }}
-          GITLEAKS_SOURCE_DIR: ${{ inputs.scan_path }}
-        run: python .rocm-security-gh/build_tools/scan_tools/github_actions/gitleaks.py
+          GITLEAKS_SOURCE_DIR: .scan-target/${{ inputs.scan_path }}
+          THEROCK_BUILD_TOOLS_DIR: ${{ github.workspace }}/.therock/build_tools
+        run: python build_tools/scan_tools/github_actions/gitleaks.py
 
       - name: Mint security-events token
         if: always() && steps.scan.outputs.sarif_path != ''
