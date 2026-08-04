@@ -25,9 +25,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TypedDict, cast
 from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -70,6 +71,32 @@ _LEAK_SECURITY_SEVERITY_HIGH = "8.5"
 
 # Null SHA-1 git uses for "no previous commit" (a newly created ref).
 Z40 = "0" * 40
+
+
+class _PullRequestRef(TypedDict):
+    sha: str
+
+
+class _PullRequestPayload(TypedDict):
+    base: _PullRequestRef
+    head: _PullRequestRef
+
+
+class _PullRequestEvent(TypedDict):
+    pull_request: _PullRequestPayload
+
+
+class _PushEvent(TypedDict):
+    before: str
+    after: str
+
+
+# The real GitHub event payload is a large, event-type-dependent JSON object
+# (see gha_load_github_event); only the shapes this module actually reads are
+# modeled here. Other event types (schedule, workflow_dispatch, release, ...)
+# only ever reach the `Mapping[str, object]` branch below, which is never
+# indexed into directly.
+GitHubEventPayload = _PullRequestEvent | _PushEvent | Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -198,7 +225,9 @@ def _resolve_config_path() -> str:
     return _CONFIG_PATH
 
 
-def _determine_log_opts(scan_mode: str, event_name: str, event: dict[str, Any]) -> str:
+def _determine_log_opts(
+    scan_mode: str, event_name: str, event: GitHubEventPayload
+) -> str:
     """Build the `--log-opts` value for `gitleaks detect`.
 
     Returns '' to scan the full history; otherwise returns a git range
@@ -215,7 +244,9 @@ def _determine_log_opts(scan_mode: str, event_name: str, event: dict[str, Any]) 
         )
 
     if event_name == "pull_request":
-        pr = event["pull_request"]
+        # Safe: GitHub guarantees this shape for `pull_request` events.
+        pr_event = cast(_PullRequestEvent, event)
+        pr = pr_event["pull_request"]
         base_sha = pr["base"]["sha"]
         head_sha = pr["head"]["sha"]
         fetch_result = subprocess.run(
@@ -247,9 +278,10 @@ def _determine_log_opts(scan_mode: str, event_name: str, event: dict[str, Any]) 
         return f"{base_sha}..{head_sha}"
 
     if event_name == "push":
-        # GitHub guarantees `before` and `after` on push events.
-        before = event["before"]
-        after = event["after"]
+        # Safe: GitHub guarantees `before` and `after` on push events.
+        push_event = cast(_PushEvent, event)
+        before = push_event["before"]
+        after = push_event["after"]
         if before == Z40:
             log.info("Push created a new ref; falling back to full history scan")
             return ""

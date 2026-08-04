@@ -4,12 +4,12 @@
 """Compute the smallest `actions/checkout` fetch-depth for the current event."""
 
 import sys
-from typing import Any
+from collections.abc import Mapping
 
 from github_actions_api import gha_load_github_event, gha_set_output
 
 
-def compute_fetch_depth(payload: dict[str, Any]) -> str:
+def compute_fetch_depth(payload: Mapping[str, object]) -> str:
     pr = payload.get("pull_request")
     if not isinstance(pr, dict):
         return "0"
