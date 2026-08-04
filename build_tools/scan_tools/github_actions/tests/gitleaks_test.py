@@ -216,24 +216,25 @@ class ResolveConfigPathTest(unittest.TestCase):
     """Tests for `_resolve_config_path`."""
 
     def setUp(self):
-        # `_resolve_config_path` resolves _CONFIG_PATH relative to cwd, so
-        # each test runs in its own tempdir to isolate the lookup.
-        self._original_cwd = Path.cwd()
+        # `_resolve_config_path` resolves _CONFIG_PATH relative to
+        # REPO_ROOT (this script's own checkout), not the cwd, so patch
+        # REPO_ROOT to a tempdir to isolate each test from the real repo.
         self._tmp = tempfile.TemporaryDirectory()
-        os.chdir(self._tmp.name)
-
-    def tearDown(self):
-        os.chdir(self._original_cwd)
-        self._tmp.cleanup()
+        self._tmp_root = Path(self._tmp.name)
+        patcher = mock.patch("gitleaks.REPO_ROOT", self._tmp_root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._tmp.cleanup)
 
     def test_returns_config_path_when_present(self):
-        Path(_CONFIG_PATH).write_text("# stub config", encoding="utf-8")
-        self.assertEqual(_resolve_config_path(), _CONFIG_PATH)
+        expected = self._tmp_root / _CONFIG_PATH
+        expected.write_text("# stub config", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(), str(expected))
 
     def test_raises_when_missing(self):
         with self.assertRaises(FileNotFoundError) as ctx:
             _resolve_config_path()
-        self.assertIn(_CONFIG_PATH, str(ctx.exception))
+        self.assertIn(str(self._tmp_root / _CONFIG_PATH), str(ctx.exception))
 
 
 class MdCodeFenceTest(unittest.TestCase):

@@ -216,13 +216,17 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
 
 
 def _resolve_config_path() -> str:
-    if not Path(_CONFIG_PATH).is_file():
+    # Anchored on REPO_ROOT (this script's own checkout), not the cwd:
+    # when this workflow is called from another repo, the cwd holds
+    # *that* repo's checkout (the scan target), not rocm-security-gh's.
+    config_path = REPO_ROOT / _CONFIG_PATH
+    if not config_path.is_file():
         raise FileNotFoundError(
-            f"gitleaks config not found at '{_CONFIG_PATH}'. "
-            "Run from the repo root so the config is resolvable."
+            f"gitleaks config not found at '{config_path}'. "
+            "Expected it alongside this script's rocm-security-gh checkout."
         )
-    log.info("Using gitleaks config: %s", _CONFIG_PATH)
-    return _CONFIG_PATH
+    log.info("Using gitleaks config: %s", config_path)
+    return str(config_path)
 
 
 def _determine_log_opts(

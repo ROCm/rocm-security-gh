@@ -84,13 +84,26 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The two checkout steps above bring in the *calling* repo (the
+          # scan target) at $GITHUB_WORKSPACE. gitleaks.py, gitleaks.toml,
+          # and their helper modules only live in this repo, so fetch
+          # this workflow's own repo/commit into a side directory rather
+          # than assuming the caller's checkout happens to contain them.
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .rocm-security-gh
+          persist-credentials: false
+
       - name: Run gitleaks
         id: scan
         env:
           GITLEAKS_SCAN_MODE: ${{ inputs.scan_mode }}
           GITLEAKS_REPORT_FORMATS: ${{ inputs.report_formats }}
           GITLEAKS_SOURCE_DIR: ${{ inputs.scan_path }}
-        run: python build_tools/scan_tools/github_actions/gitleaks.py
+        run: python .rocm-security-gh/build_tools/scan_tools/github_actions/gitleaks.py
 
       - name: Mint security-events token
         if: always() && steps.scan.outputs.sarif_path != ''

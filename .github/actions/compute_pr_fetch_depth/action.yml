@@ -26,4 +26,11 @@ runs:
     - name: Compute fetch-depth
       id: compute
       shell: bash
-      run: python build_tools/github_actions/compute_pr_depth.py
+      # $GITHUB_ACTION_PATH always points at this action's own checkout
+      # (this repo, at the ref the *calling* reusable workflow was
+      # invoked with) regardless of what a caller has checked out at
+      # $GITHUB_WORKSPACE, so resolve the sibling script from there
+      # instead of assuming a repo-root-relative cwd.
+      run: |
+        repo_root="$(dirname "$(dirname "$(dirname "$GITHUB_ACTION_PATH")")")"
+        python "$repo_root/build_tools/github_actions/compute_pr_depth.py"
