@@ -16,13 +16,13 @@ on:
 
 jobs:
   gitleaks:
+    # `gitleaks.yml` declares no `permissions:` of its own, so this job's
+    # grant flows straight through to its steps: `contents: read` for the
+    # checkout steps, `security-events: write` for the SARIF upload.
+    permissions:
+      contents: read
+      security-events: write
     uses: ./.github/workflows/gitleaks.yml
     with:
       scan_mode: all
       report_formats: sarif
-    secrets:
-      # Mints a short-lived, security-events-scoped installation token so
-      # findings reach Security -> Code scanning without granting this
-      # workflow's own GITHUB_TOKEN any elevated permissions.
-      GH_APP_SECURITY_GH_CID: ${{ secrets.GH_APP_SECURITY_GH_CID }}
-      GH_APP_SECURITY_GH_PRIVATE_KEY: ${{ secrets.GH_APP_SECURITY_GH_PRIVATE_KEY }}

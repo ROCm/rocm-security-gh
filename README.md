@@ -12,31 +12,34 @@ All ROCm repository owners and maintainers should adopt these workflows and secu
 
 `.github/workflows/gitleaks.yml` is a `workflow_call` reusable workflow that
 any ROCm repository can call to scan itself with
-[gitleaks](https://github.com/gitleaks/gitleaks). It never requires a caller
-to hold any long-lived credentials: SARIF uploads authenticate with a
-short-lived token minted from the `rocm-security-gh` GitHub App installation
-on the caller's own repo, scoped to `security-events: write` only.
+[gitleaks](https://github.com/gitleaks/gitleaks). It declares no
+`permissions:` of its own -- every permission its steps use (`contents:
+read` to check out code, `security-events: write` to upload SARIF) is
+whatever the calling job explicitly grants. This is deliberate: a reusable
+workflow's `permissions:` block can only preserve or reduce what a caller
+grants, never elevate it, so a restrictive block here would silently zero
+out a caller's `security-events: write` grant and break SARIF uploads with
+no obvious error (this exact bug hit
+[ROCm/rocm-tests#70](https://github.com/ROCm/rocm-tests/pull/70)).
 
 ### Split scanning strategy
 
-PRs (including fork PRs, which never receive org/repo secrets) and
-trusted/scheduled runs are handled differently:
+PRs (including fork PRs) and trusted/scheduled runs should request
+different things:
 
 - **PR-time scans** should request `report_formats: csv` (or `json`/`junit`)
-  and pass no secrets at all. Findings are uploaded as a build artifact for
-  a human to review; nothing touches the Security tab, so no GitHub App
-  credentials are needed and fork PRs work identically to same-repo PRs.
+  and grant only `contents: read`. Findings are uploaded as a build
+  artifact for a human to review; nothing touches the Security tab, so
+  fork PRs (which never receive elevated tokens) work identically to
+  same-repo PRs.
 - **Trusted scans** (`schedule`, `workflow_dispatch`, `push` to the default
-  branch) should request `report_formats: sarif` and pass the two App
-  secrets below so findings land in Security -> Code scanning.
+  branch) should request `report_formats: sarif` and grant both
+  `contents: read` and `security-events: write` so findings land in
+  Security -> Code scanning.
 
 ### Consuming this workflow from another repo
 
-1. Install the `rocm-security-gh` GitHub App on your repository (contents:
-   read, security-events: write) and confirm your repo has access to the
-   org-level `GH_APP_SECURITY_GH_CID` / `GH_APP_SECURITY_GH_PRIVATE_KEY`
-   secrets.
-2. Add a PR-time workflow that needs no secrets:
+1. Add a PR-time workflow:
 
    ```yaml
    name: Security scan (PR)
@@ -51,7 +54,11 @@ trusted/scheduled runs are handled differently:
          report_formats: csv
    ```
 
-3. Add a scheduled/trusted workflow that uploads to the Security tab:
+2. Add a scheduled/trusted workflow that uploads to the Security tab. Grant
+   `security-events: write` on the `uses:` job itself -- the top-level
+   `permissions:` block above it is not enough, since a `permissions:`
+   block (wherever it's declared) implicitly zeroes out anything it
+   doesn't list:
 
    ```yaml
    name: Security scan (scheduled)
@@ -59,31 +66,17 @@ trusted/scheduled runs are handled differently:
      schedule:
        - cron: "0 10 * * 6"
      workflow_dispatch:
-   permissions:
-     contents: read
    jobs:
      gitleaks:
+       permissions:
+         contents: read
+         security-events: write
        uses: ROCm/rocm-security-gh/.github/workflows/gitleaks.yml@main
        with:
          scan_mode: all
          report_formats: sarif
-       secrets:
-         GH_APP_SECURITY_GH_CID: ${{ secrets.GH_APP_SECURITY_GH_CID }}
-         GH_APP_SECURITY_GH_PRIVATE_KEY: ${{ secrets.GH_APP_SECURITY_GH_PRIVATE_KEY }}
    ```
 
 Pin `@main` to a tag or commit SHA once this workflow has a release; see
 `.github/workflows/gitleaks_main.yml` and `.github/workflows/pre_commit_security.yml`
 in this repo for the versions used to scan `rocm-security-gh` itself.
-
-### TheRock dependency
-
-`gitleaks.py` and `compute_pr_depth.py` call a handful of `gha_*` GitHub
-Actions helpers (`gha_load_github_event`, `gha_set_output`,
-`gha_append_step_summary`) that live in
-[ROCm/TheRock's `github_actions_api` module](https://github.com/ROCm/TheRock/blob/main/build_tools/github_actions/github_actions_api.py)
-rather than being duplicated here. `gitleaks.yml` checks out TheRock's
-`main` branch (sparse, one file, `fetch-depth: 1`) alongside this repo's
-own tooling and points `THEROCK_BUILD_TOOLS_DIR` at it before running
-either script. This trades a small amount of build-time coupling to
-TheRock's `main` for a single source of truth on those helpers.
