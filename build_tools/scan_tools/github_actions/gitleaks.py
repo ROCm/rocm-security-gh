@@ -30,10 +30,10 @@ from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
-THEROCK_DIR = Path(__file__).resolve().parent.parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 # Add build_tools to path for github_actions imports.
-sys.path.insert(0, str(THEROCK_DIR / "build_tools"))
+sys.path.insert(0, str(REPO_ROOT / "build_tools"))
 from github_actions.github_actions_api import (  # noqa: E402
     gha_append_step_summary,
     gha_load_github_event,
