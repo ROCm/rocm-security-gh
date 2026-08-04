@@ -1,14 +1,16 @@
 # gitleaks.toml
 # Reference: https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
 #
-# Layered allowlist policy for TheRock:
+# Layered allowlist policy, shared across every repo this config scans
+# (this is the single gitleaks.toml used by the `gitleaks.yml` reusable
+# workflow for all callers, not just this repo):
 #   * `[allowlist]` below applies to every rule (global).
 #   * `.gitleaksignore` (separate file at repo root) carries one-off
 #     fingerprint suppressions for historical findings that don't fit
 #     a structural rule. Keep that file shrinking; move recurring
 #     patterns up into this config when you see them.
 
-title = "TheRock gitleaks config"
+title = "rocm-security-gh gitleaks config"
 
 [extend]
 # Inherit gitleaks' built-in ruleset (rotations, AWS, GCP, Slack, ...).

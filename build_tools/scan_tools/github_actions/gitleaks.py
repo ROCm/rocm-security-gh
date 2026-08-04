@@ -582,7 +582,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
-    gha = _import_github_actions_api()
+    try:
+        gha = _import_github_actions_api()
+    except RuntimeError as exc:
+        log.error("%s", exc)
+        return 2
     args = build_parser().parse_args(argv)
 
     try:
@@ -639,6 +643,15 @@ def main(argv: list[str]) -> int:
         )
     except RuntimeError as exc:
         log.error("%s", exc)
+        _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+        return 2
+    except Exception:
+        # get_gitleaks_binary() can also fail with e.g. KeyError (tarball
+        # missing the 'gitleaks' member) or OSError (download/network
+        # errors) rather than RuntimeError; the documented contract maps
+        # every scanner failure to exit code 2, so this is a deliberately
+        # broad catch-all at main()'s top-level error boundary.
+        log.exception("gitleaks install or scan failed unexpectedly")
         _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2
 

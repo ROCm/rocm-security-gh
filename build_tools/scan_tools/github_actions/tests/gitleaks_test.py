@@ -15,10 +15,12 @@ from gitleaks import (
     _LEAK_SECURITY_SEVERITY_HIGH,
     _determine_log_opts,
     _enrich_sarif_with_security_severity,
+    _GithubActionsApi,
     _import_github_actions_api,
     _md_code_fence,
     _parse_report_formats,
     _resolve_config_path,
+    main,
 )
 
 
@@ -61,6 +63,45 @@ class ImportGithubActionsApiTest(unittest.TestCase):
         self.assertEqual(gha.append_step_summary("x"), "summary:x")
         self.assertEqual(gha.load_github_event(), {"stub": True})
         self.assertEqual(gha.set_output({"a": "b"}), {"a": "b"})
+
+
+class MainTest(unittest.TestCase):
+    """Tests for main()'s documented exit-code contract."""
+
+    def _stub_gha(self) -> _GithubActionsApi:
+        return _GithubActionsApi(
+            append_step_summary=lambda summary: None,
+            load_github_event=lambda: {},
+            set_output=lambda outputs: None,
+        )
+
+    def test_import_failure_returns_2_without_raising(self):
+        # _import_github_actions_api() runs before argument parsing; a
+        # missing THEROCK_BUILD_TOOLS_DIR must map to exit code 2, not an
+        # unhandled traceback.
+        with mock.patch(
+            "gitleaks._import_github_actions_api",
+            side_effect=RuntimeError("THEROCK_BUILD_TOOLS_DIR is not set"),
+        ):
+            self.assertEqual(main([]), 2)
+
+    def test_unexpected_scanner_exception_returns_2_without_raising(self):
+        # get_gitleaks_binary()/_run_gitleaks() can fail with exception
+        # types other than RuntimeError (e.g. KeyError from a malformed
+        # tarball, OSError from a download failure); those must still map
+        # to exit code 2 per this module's documented contract, not
+        # escape main() as an unhandled exception.
+        with (
+            mock.patch(
+                "gitleaks._import_github_actions_api",
+                return_value=self._stub_gha(),
+            ),
+            mock.patch("gitleaks._resolve_config_path", return_value="gitleaks.toml"),
+            mock.patch(
+                "gitleaks.get_gitleaks_binary", side_effect=KeyError("gitleaks")
+            ),
+        ):
+            self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
 
 
 class ParseReportFormatsTest(unittest.TestCase):
