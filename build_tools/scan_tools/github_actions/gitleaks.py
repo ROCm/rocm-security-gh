@@ -625,12 +625,6 @@ def main(argv: list[str]) -> int:
 
     sarif_target = next((t for t in targets if t.fmt == "sarif"), None)
     non_sarif = [t for t in targets if t.fmt != "sarif"]
-    gha.set_output(
-        {
-            "sarif_path": "" if sarif_target is None else str(sarif_target.path),
-            "non_sarif_paths": "\n".join(str(t.path) for t in non_sarif),
-        }
-    )
 
     try:
         binary = get_gitleaks_binary()
@@ -640,6 +634,24 @@ def main(argv: list[str]) -> int:
             config_path=config_path,
             log_opts=log_opts,
             source_dir=source_dir,
+        )
+        # Set outputs only after a successful run, gated on the report
+        # actually existing on disk: the workflow's upload steps run with
+        # `if: always() && steps.scan.outputs.sarif_path != ''`, so a
+        # non-empty path set *before* gitleaks runs (or on a path that
+        # never got written) would make the SARIF upload step fire
+        # against a missing file and fail with a confusing second error.
+        gha.set_output(
+            {
+                "sarif_path": (
+                    str(sarif_target.path)
+                    if sarif_target is not None and sarif_target.path.is_file()
+                    else ""
+                ),
+                "non_sarif_paths": "\n".join(
+                    str(t.path) for t in non_sarif if t.path.is_file()
+                ),
+            }
         )
     except RuntimeError as exc:
         log.error("%s", exc)

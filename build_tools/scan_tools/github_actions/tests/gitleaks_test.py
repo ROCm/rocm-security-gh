@@ -103,6 +103,31 @@ class MainTest(unittest.TestCase):
         ):
             self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
 
+    def test_scan_failure_never_reports_a_nonexistent_sarif_path(self):
+        # `set_output` must not be called with a non-empty sarif_path
+        # before the report file actually exists: the workflow's upload
+        # step runs whenever `sarif_path != ''`, so reporting the path
+        # ahead of (or despite) a failed run would make that step fire
+        # against a missing file and mask the real failure.
+        set_output = mock.Mock()
+        gha = _GithubActionsApi(
+            append_step_summary=lambda summary: None,
+            load_github_event=lambda: {},
+            set_output=set_output,
+        )
+        with (
+            mock.patch("gitleaks._import_github_actions_api", return_value=gha),
+            mock.patch("gitleaks._resolve_config_path", return_value="gitleaks.toml"),
+            mock.patch(
+                "gitleaks.get_gitleaks_binary",
+                side_effect=RuntimeError("download failed"),
+            ),
+        ):
+            self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
+        for call in set_output.call_args_list:
+            (outputs,) = call.args
+            self.assertEqual(outputs.get("sarif_path", ""), "")
+
 
 class ParseReportFormatsTest(unittest.TestCase):
     """Tests for `_parse_report_formats`."""
