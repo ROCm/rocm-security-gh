@@ -1,0 +1,33 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Weekly security scan: runs on a fixed cadence and pushes SARIF findings
+# to the repository's code-scanning Security tab. Complements the PR-side
+# jobs in `pre_commit_security.yml`, which scan only what changed in a PR
+# and upload plain-text/CSV artifacts for in-review browsing. Sibling
+# scanners can be added as additional jobs in this file as they come
+# online, keeping all scheduled security scans discoverable in one place.
+
+name: Weekly security scan
+
+on:
+  # Run every Saturday at 10:00 UTC.
+  schedule:
+    - cron: "0 10 * * 6"
+  # Allow re-running the weekly scan on demand, e.g. after tweaking a
+  # scanner's config or rotating its version pin, so the Security tab can
+  # be refreshed without an unrelated commit.
+  workflow_dispatch:
+
+jobs:
+  gitleaks:
+    # `gitleaks.yml` declares no `permissions:` of its own, so this job's
+    # grant flows straight through to its steps: `contents: read` for the
+    # checkout steps, `security-events: write` for the SARIF upload.
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/gitleaks.yml
+    with:
+      scan_mode: all
+      report_formats: sarif

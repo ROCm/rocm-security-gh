@@ -39,7 +39,8 @@ different things:
 
 ### Consuming this workflow from another repo
 
-1. Add a PR-time workflow:
+1. Add a PR-time job (can live alongside a `zizmor` job in the same
+   workflow):
 
    ```yaml
    name: Security scan (PR)
@@ -54,14 +55,15 @@ different things:
          report_formats: csv
    ```
 
-2. Add a scheduled/trusted workflow that uploads to the Security tab. Grant
-   `security-events: write` on the `uses:` job itself -- the top-level
-   `permissions:` block above it is not enough, since a `permissions:`
-   block (wherever it's declared) implicitly zeroes out anything it
-   doesn't list:
+2. Add a scheduled job that uploads to the Security tab (sibling
+   scanners, e.g. `zizmor`, can live in the same workflow -- see
+   `weekly_security.yml` below). Grant `security-events: write` on the
+   `uses:` job itself -- the top-level `permissions:` block above it is
+   not enough, since a `permissions:` block (wherever it's declared)
+   implicitly zeroes out anything it doesn't list:
 
    ```yaml
-   name: Security scan (scheduled)
+   name: Weekly security scan
    on:
      schedule:
        - cron: "0 10 * * 6"
@@ -78,5 +80,6 @@ different things:
    ```
 
 Pin `@main` to a tag or commit SHA once this workflow has a release; see
-`.github/workflows/gitleaks_main.yml` and `.github/workflows/pre_commit_security.yml`
-in this repo for the versions used to scan `rocm-security-gh` itself.
+`.github/workflows/weekly_security.yml` and
+`.github/workflows/pre_commit_security.yml` in this repo for the versions
+used to scan `rocm-security-gh` itself.
