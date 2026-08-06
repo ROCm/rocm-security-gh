@@ -1,0 +1,29 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Post-merge zizmor scan: runs after every push to main (typically the
+# squash/rebase/merge of a PR) and pushes SARIF findings to the
+# repository's code-scanning Security tab. Complements the PR-side
+# zizmor job in `pre_commit_security.yml`, which scans only changed
+# workflow/action files and uploads a plain-text artifact for in-review
+# browsing.
+name: Zizmor main
+
+on:
+  # Run every Saturday at 10:00 UTC.
+  schedule:
+    - cron: "0 10 * * 6"
+  # Allow re-running the weekly scan on demand, e.g. after
+  # tweaking `gitleaks.toml` or rotating the gitleaks version pin, so
+  # the Security tab can be refreshed without an unrelated commit.
+  workflow_dispatch:
+
+jobs:
+  zizmor:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/zizmor.yml
+    with:
+      scan_mode: all
+      report_formats: sarif
