@@ -12,15 +12,7 @@ All ROCm repository owners and maintainers should adopt these workflows and secu
 
 `.github/workflows/gitleaks.yml` is a `workflow_call` reusable workflow that
 any ROCm repository can call to scan itself with
-[gitleaks](https://github.com/gitleaks/gitleaks). It declares no
-`permissions:` of its own -- every permission its steps use (`contents:
-read` to check out code, `security-events: write` to upload SARIF) is
-whatever the calling job explicitly grants. This is deliberate: a reusable
-workflow's `permissions:` block can only preserve or reduce what a caller
-grants, never elevate it, so a restrictive block here would silently zero
-out a caller's `security-events: write` grant and break SARIF uploads with
-no obvious error (this exact bug hit
-[ROCm/rocm-tests#70](https://github.com/ROCm/rocm-tests/pull/70)).
+[gitleaks](https://github.com/gitleaks/gitleaks).
 
 ### Split scanning strategy
 
