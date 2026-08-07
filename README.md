@@ -15,16 +15,7 @@ that any ROCm repository can call to scan its own Python source with
 [bandit](https://bandit.readthedocs.io/). It declares no `permissions:`
 of its own -- every permission its steps use (`contents: read` to check
 out code, `security-events: write` to upload SARIF) is whatever the
-calling job explicitly grants. This is deliberate: a reusable
-workflow's `permissions:` block can only preserve or reduce what a
-caller grants, never elevate it, and a reusable workflow that itself
-*requests* a scope the caller didn't grant fails the whole call at
-startup ("requesting `security-events: write`, but is only allowed
-`security-events: none`"), not just the step that needed it (this
-exact class of bug hit
-[ROCm/rocm-tests#70](https://github.com/ROCm/rocm-tests/pull/70)).
-Leaving the block out entirely lets each caller grant exactly what its
-own use case needs.
+calling job explicitly grants.
 
 ### Split scanning strategy
 

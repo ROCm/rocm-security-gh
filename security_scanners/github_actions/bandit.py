@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 log = logging.getLogger(__name__)
 
@@ -51,14 +51,7 @@ class _GithubActionsApi(NamedTuple):
 
 
 def _import_github_actions_api() -> _GithubActionsApi:
-    """Import `gha_*` helpers from ROCm/TheRock's `github_actions_api` module.
-
-    Deferred (rather than a module-level import) so unit tests exercising
-    this module's pure scan/parsing logic don't need a TheRock checkout;
-    only `main()` needs these. The workflow checks out TheRock and points
-    THEROCK_BUILD_TOOLS_DIR at its `build_tools/` directory before running
-    this script.
-    """
+    """Import `gha_*` helpers from ROCm/TheRock's `github_actions_api` module."""
     therock_build_tools = os.environ.get("THEROCK_BUILD_TOOLS_DIR")
     if not therock_build_tools:
         raise RuntimeError(
@@ -291,17 +284,6 @@ def _determine_changed_python_files(
 ) -> list[Path] | None:
     """Return the changed Python source files inside `scan_path`, or `None`.
 
-    `checkout_root` is the scan target's git checkout (its repo root),
-    which the `changed`-mode branch below runs `git` in explicitly:
-    `scan_path` may point at a subdirectory of the checkout (see the
-    `scan_path` workflow input), but `git diff --name-only` always
-    prints paths relative to the repo *root*, not to the process's cwd
-    or to whatever subdirectory `git` was invoked from. Reconstructing
-    real file paths from that output requires anchoring on the same
-    root, which isn't always this process's cwd (e.g. when this
-    script's own repo, rather than the scan target, is checked out at
-    cwd).
-
     Semantics:
 
     * `None` — no usable diff range; caller should fall back to a full
@@ -404,9 +386,6 @@ def _run_bandit(
         runs = [*user_targets, tally_target]
 
     try:
-        # bandit emits a single report per invocation, so a multi-format
-        # request re-runs the full scan once per format (same tradeoff
-        # documented for zizmor; bandit has no multi-format output mode).
         for tgt in runs:
             cmd = [*base_args, "--format", tgt.fmt, "--output", str(tgt.path)]
             log.info("Running: %s", " ".join(cmd))
@@ -679,12 +658,6 @@ def main(argv: list[str]) -> int:
             files=files,
             scan_path=source_dir,
         )
-        # Set outputs only after a successful run, gated on the report
-        # actually existing on disk: the workflow's upload steps run with
-        # `if: always() && steps.scan.outputs.sarif_path != ''`, so a
-        # non-empty path reported despite a failed/incomplete run would
-        # make the SARIF upload step fire against a missing file and
-        # fail with a confusing second error.
         gha.set_output(
             {
                 "sarif_path": (
