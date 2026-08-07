@@ -145,7 +145,7 @@ jobs:
           ZIZMOR_SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
           ZIZMOR_PERSONA: ${{ inputs.persona }}
           THEROCK_BUILD_TOOLS_DIR: ${{ github.workspace }}/.therock/build_tools
-        run: python build_tools/scan_tools/github_actions/zizmor.py
+        run: python security_scanners/github_actions/zizmor.py
 
       - name: Upload SARIF report to code scanning
         if: always() && steps.scan.outputs.sarif_path != ''
