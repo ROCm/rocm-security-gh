@@ -27,11 +27,11 @@ Follow the [ROCm/TheRock style guides](https://github.com/ROCm/TheRock/tree/main
 
 ## Testing
 
-Scanner logic lives under `build_tools/scan_tools/` with unit tests
+Scanner logic lives under `security_scanners/` with unit tests
 alongside it (`*_test.py`, run via `pytest`). Before opening a PR:
 
 ```bash
-cd build_tools/scan_tools
-pip install -r ../requirements-test.txt
+cd security_scanners
+pip install -r requirements-test.txt
 pytest
 ```
