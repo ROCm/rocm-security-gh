@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install test dependencies
-        run: pip install -r build_tools/requirements-test.txt
+        run: pip install -r security_scanners/requirements-test.txt
 
       - name: Run unit tests
-        run: python -m pytest -vv build_tools
+        run: python -m pytest -vv build_tools security_scanners

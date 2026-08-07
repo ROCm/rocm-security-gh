@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import NamedTuple, TypedDict, cast
 from urllib.request import Request, urlopen
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 log = logging.getLogger(__name__)
 
