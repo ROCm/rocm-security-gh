@@ -37,20 +37,19 @@ module rather than being duplicated here; see `_import_github_actions_api`.
 
 import argparse
 import fnmatch
-import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
-import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
-from urllib.request import Request, urlopen
+
+from binary_checksums import download_and_verify_tarball, expected_sha256
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -106,20 +105,8 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "github": "github.json",
 }
 _TRIVY_VERSION = "0.70.0"
-_TRIVY_TARBALL_URL = (
-    "https://github.com/aquasecurity/trivy/releases/download/"
-    f"v{_TRIVY_VERSION}/trivy_{_TRIVY_VERSION}_Linux-64bit.tar.gz"
-)
-# From the release's own checksums file:
-# https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_0.70.0_checksums.txt
-# Unlike gitleaks (mirrored to an internal S3 bucket so CI doesn't depend
-# on github.com availability), trivy is downloaded directly from its
-# GitHub release; this pin still guards against a corrupted download or
-# in-transit tampering, just not a github.com outage.
-_TRIVY_TARBALL_SHA256 = (
-    "8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9"
-)
-_TRIVY_MAX_TARBALL_BYTES = 100 * 1024 * 1024  # 100 MiB guardrail
+_TRIVY_TARBALL_FILENAME = f"trivy_{_TRIVY_VERSION}_Linux-64bit.tar.gz"
+_TRIVY_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_TRIVY_TARBALL_FILENAME}"
 _CONFIG_PATH = "trivy.yaml"
 # Ascending severity order; threshold comparisons rely on it. Trivy has a
 # CRITICAL tier (unlike bandit/zizmor); UNKNOWN never satisfies a threshold.
@@ -132,7 +119,6 @@ _SUPPORTED_SCANNERS: tuple[str, ...] = ("vuln", "misconfig", "secret", "license"
 _DEFAULT_SCANNERS = "misconfig,vuln"
 # Internal JSON tally pass output; cleaned up before returning.
 _INTERNAL_TALLY_PATH = "trivy-tally.json"
-_DOWNLOAD_TIMEOUT_SECONDS = 60
 # Diff filter for 'changed' mode: dependency manifests/lockfiles (drive
 # vuln) plus container/IaC sources (drive misconfig). Broad globs like
 # **/*.yaml are excluded so unrelated YAML changes don't defeat the
@@ -229,68 +215,21 @@ def _emit_non_sarif_reports(
         gha_append_step_summary("\n\n".join(summary_chunks))
 
 
-def _sha256_of(path: Path) -> str:
-    """Return the SHA-256 of `path` as a lowercase hex string."""
-    with open(path, "rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
-
-
-def _ensure_trivy() -> Path:
-    """Return the path to the pinned, SHA256-verified trivy binary,
-    downloading it if needed.
-
-    Cached under `$RUNNER_TEMP` (or the system temp dir), keyed by
-    version, mirroring the gitleaks installer's layout. Smoke-tests the
-    binary afterwards so we fail fast on a corrupt download or install.
-    """
-    cache_root = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
-    install_dir = cache_root / f"trivy-{_TRIVY_VERSION}"
+def get_trivy_binary() -> Path:
+    """Download, verify, and extract the pinned trivy binary, and return its path."""
+    install_dir = (
+        Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
+        / f"trivy-{_TRIVY_VERSION}"
+    )
     binary = install_dir / "trivy"
-    if binary.is_file() and os.access(binary, os.X_OK):
-        log.info("Using cached trivy binary at %s", binary)
-        return binary
-
-    install_dir.mkdir(parents=True, exist_ok=True)
+    expected_sha = expected_sha256(REPO_ROOT, _TRIVY_TARBALL_FILENAME)
     log.info("Downloading trivy v%s from %s", _TRIVY_VERSION, _TRIVY_TARBALL_URL)
-    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-        tarball_path = Path(tmp.name)
-    try:
-        with (
-            urlopen(
-                Request(_TRIVY_TARBALL_URL), timeout=_DOWNLOAD_TIMEOUT_SECONDS
-            ) as resp,
-            open(tarball_path, "wb") as out,
-        ):
-            written = 0
-            chunk = resp.read(1024 * 1024)
-            while chunk:
-                if written + len(chunk) > _TRIVY_MAX_TARBALL_BYTES:
-                    raise RuntimeError(
-                        f"trivy tarball exceeds {_TRIVY_MAX_TARBALL_BYTES} bytes "
-                        f"(source: {_TRIVY_TARBALL_URL})"
-                    )
-                out.write(chunk)
-                written += len(chunk)
-                chunk = resp.read(1024 * 1024)
-        actual_sha = _sha256_of(tarball_path)
-        if actual_sha != _TRIVY_TARBALL_SHA256:
-            raise RuntimeError(
-                f"trivy tarball SHA256 mismatch: expected "
-                f"{_TRIVY_TARBALL_SHA256}, got {actual_sha} "
-                f"(downloaded from {_TRIVY_TARBALL_URL})"
-            )
-        with tarfile.open(tarball_path, mode="r:gz") as tar:
-            # filter="data" rejects unsafe members (traversal, abs paths, devices).
-            member = tar.getmember("trivy")
-            tar.extract(member, path=install_dir, filter="data")
-    finally:
-        tarball_path.unlink(missing_ok=True)
-
-    if not binary.is_file():
-        raise RuntimeError(
-            f"trivy tarball for v{_TRIVY_VERSION} did not contain a 'trivy' "
-            f"file at {binary}"
-        )
+    download_and_verify_tarball(
+        url=_TRIVY_TARBALL_URL,
+        expected_sha256=expected_sha,
+        member_name="trivy",
+        install_dir=install_dir,
+    )
     binary.chmod(0o755)
 
     try:
@@ -329,11 +268,7 @@ def _trivy_subprocess_env() -> dict[str, str]:
 
 
 def _parse_report_formats(raw: str) -> list[_ReportTarget]:
-    """Parse a comma-separated `report_formats` value into report targets.
-
-    Whitespace is trimmed, duplicates collapse to the first occurrence,
-    and unknown formats raise :class:`ValueError`.
-    """
+    """Parse a comma-separated `report_formats` value into report targets."""
     targets: list[_ReportTarget] = []
     seen: set[str] = set()
     for raw_fmt in raw.split(","):
@@ -357,12 +292,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
 
 
 def _parse_scanners(raw: str) -> list[str]:
-    """Parse a comma-separated `scanners` value into a canonical list.
-
-    Whitespace is trimmed, names are lower-cased, duplicates collapse
-    to the first occurrence, and unknown scanners raise
-    :class:`ValueError`.
-    """
+    """Parse a comma-separated `scanners` value into a canonical list."""
     scanners: list[str] = []
     seen: set[str] = set()
     for raw_s in raw.split(","):
@@ -385,9 +315,6 @@ def _parse_scanners(raw: str) -> list[str]:
 
 
 def _resolve_config_path() -> str:
-    # Anchored on REPO_ROOT (this script's own checkout), not the cwd:
-    # when this workflow is called from another repo, the cwd holds
-    # *that* repo's checkout (the scan target), not rocm-security-gh's.
     config_path = REPO_ROOT / _CONFIG_PATH
     if not config_path.is_file():
         raise FileNotFoundError(
@@ -557,14 +484,6 @@ def _run_trivy(
     """Run trivy for each user-requested format plus an internal JSON
     tally pass if the user didn't already request one, and return a
     severity tally.
-
-    Trivy always runs with every severity tier and `--exit-code 0` so
-    the uploaded reports stay complete and findings don't fail the run
-    themselves; the threshold-based job-fail decision is taken
-    separately in `main()` from the returned tally.
-
-    Raises :class:`RuntimeError` for any non-zero trivy exit (an
-    internal scan failure, not a finding).
     """
     severity_csv = ",".join(_SEVERITY_ORDER)
     scanners_csv = ",".join(scanners)
@@ -634,16 +553,7 @@ def _run_trivy(
 
 
 def _tally_findings_by_severity(json_path: Path) -> dict[str, int]:
-    """Read trivy's JSON output and tally findings by severity.
-
-    Trivy's `--format json` emits a top-level object with a `Results`
-    array; each result groups findings under `Vulnerabilities` /
-    `Misconfigurations` / `Secrets` / `Licenses`, each carrying a
-    `Severity` string. Returns a dict with at minimum the keys in
-    `_SEVERITY_ORDER` (each `int >= 0`); any other `Severity` value
-    (e.g. `UNKNOWN`) is preserved but doesn't participate in the
-    threshold decision.
-    """
+    """Read trivy's JSON output and tally findings by severity."""
     try:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -831,7 +741,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     try:
-        binary = _ensure_trivy()
+        binary = get_trivy_binary()
         counts = _run_trivy(
             binary,
             targets,
@@ -862,11 +772,6 @@ def main(argv: list[str]) -> int:
         _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2
     except Exception:
-        # _ensure_trivy()/_run_trivy() can also fail with exception types
-        # other than RuntimeError (e.g. OSError from a download failure);
-        # the documented contract maps every scanner failure to exit
-        # code 2, so this is a deliberately broad catch-all at main()'s
-        # top-level error boundary.
         log.exception("trivy install or scan failed unexpectedly")
         _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2

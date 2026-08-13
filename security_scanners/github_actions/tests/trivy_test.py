@@ -14,6 +14,8 @@ sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from trivy import (
     _CONFIG_PATH,
     _SEVERITY_ORDER,
+    _TRIVY_TARBALL_FILENAME,
+    _TRIVY_VERSION,
     _determine_changed_audited_files,
     _diff_range,
     _GithubActionsApi,
@@ -24,6 +26,7 @@ from trivy import (
     _resolve_config_path,
     _tally_findings_by_severity,
     _trivy_subprocess_env,
+    get_trivy_binary,
     main,
 )
 
@@ -90,7 +93,7 @@ class MainTest(unittest.TestCase):
             self.assertEqual(main([]), 2)
 
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
-        # _ensure_trivy()/_run_trivy() can fail with exception types
+        # get_trivy_binary()/_run_trivy() can fail with exception types
         # other than RuntimeError (e.g. OSError from a download
         # failure); those must still map to exit code 2 per this
         # module's documented contract, not escape main() as an
@@ -101,7 +104,7 @@ class MainTest(unittest.TestCase):
                 return_value=self._stub_gha(),
             ),
             mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
-            mock.patch("trivy._ensure_trivy", side_effect=OSError("network down")),
+            mock.patch("trivy.get_trivy_binary", side_effect=OSError("network down")),
         ):
             self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
 
@@ -119,7 +122,7 @@ class MainTest(unittest.TestCase):
             ),
             mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
             mock.patch(
-                "trivy._ensure_trivy",
+                "trivy.get_trivy_binary",
                 side_effect=RuntimeError("failed to install trivy"),
             ),
         ):
@@ -139,11 +142,11 @@ class MainTest(unittest.TestCase):
             mock.patch(
                 "trivy._determine_changed_audited_files", return_value=[]
             ),
-            mock.patch("trivy._ensure_trivy") as ensure_trivy,
+            mock.patch("trivy.get_trivy_binary") as get_binary,
         ):
             rc = main(["--scan-mode", "changed", "--source-dir", "."])
         self.assertEqual(rc, 0)
-        ensure_trivy.assert_not_called()
+        get_binary.assert_not_called()
         set_output.assert_called_once_with({"sarif_path": "", "non_sarif_paths": ""})
 
     def test_invalid_report_formats_returns_1(self):
@@ -469,6 +472,80 @@ class ResolveConfigPathTest(unittest.TestCase):
     def test_raises_when_missing(self):
         with self.assertRaises(FileNotFoundError):
             _resolve_config_path()
+
+
+class GetTrivyBinaryTest(unittest.TestCase):
+    """Tests for `get_trivy_binary`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"RUNNER_TEMP": str(self._tmp_root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._install_dir = self._tmp_root / f"trivy-{_TRIVY_VERSION}"
+        self._binary = self._install_dir / "trivy"
+
+    def _fake_download(self, **_kwargs) -> Path:
+        self._install_dir.mkdir(parents=True, exist_ok=True)
+        self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        return self._binary
+
+    def test_always_reverifies_even_if_a_file_already_exists_at_the_path(self):
+        # A stale/tampered file already sitting at the install path must
+        # never be trusted without a fresh digest check: this asserts
+        # download_and_verify_tarball() (and therefore the checksum
+        # check inside it) always runs, regardless of what's on disk
+        # beforehand.
+        self._install_dir.mkdir(parents=True)
+        self._binary.write_text("pre-existing, unverified content", encoding="utf-8")
+        self._binary.chmod(0o755)
+        with (
+            mock.patch("trivy.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "trivy.download_and_verify_tarball", side_effect=self._fake_download
+            ) as download,
+            mock.patch(
+                "trivy.subprocess.run",
+                return_value=mock.Mock(
+                    returncode=0, stdout=f"Version: {_TRIVY_VERSION}\n"
+                ),
+            ),
+        ):
+            get_trivy_binary()
+        download.assert_called_once()
+
+    def test_downloads_verifies_and_installs(self):
+        with (
+            mock.patch("trivy.expected_sha256", return_value="a" * 64) as exp_sha,
+            mock.patch(
+                "trivy.download_and_verify_tarball", side_effect=self._fake_download
+            ) as download,
+            mock.patch(
+                "trivy.subprocess.run",
+                return_value=mock.Mock(
+                    returncode=0, stdout=f"Version: {_TRIVY_VERSION}\n"
+                ),
+            ),
+        ):
+            result = get_trivy_binary()
+        exp_sha.assert_called_once_with(mock.ANY, _TRIVY_TARBALL_FILENAME)
+        download.assert_called_once()
+        self.assertEqual(result, self._binary)
+        self.assertTrue(os.access(self._binary, os.X_OK))
+
+    def test_binary_fails_to_execute_raises(self):
+        with (
+            mock.patch("trivy.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "trivy.download_and_verify_tarball", side_effect=self._fake_download
+            ),
+            mock.patch("trivy.subprocess.run", side_effect=OSError("cannot execute")),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_trivy_binary()
+        self.assertIn("failed to execute", str(ctx.exception))
 
 
 if __name__ == "__main__":

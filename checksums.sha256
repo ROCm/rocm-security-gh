@@ -1,0 +1,12 @@
+# SHA-256 checksums for third-party scanner artifacts downloaded at run
+# time (gitleaks, trivy, zizmor, bandit, ...). One line per release:
+# "<digest>  <filename>" (sha256sum format). A mismatch means the
+# artifact is not used.
+#
+# Before adding an entry, verify the artifact against its own project's
+# published checksum/signature. Precede each entry with a comment linking
+# to where it was downloaded from, so the digest is traceable back to its
+# source. Remove entries no longer referenced.
+
+# Original source: https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_0.70.0_Linux-64bit.tar.gz
+8b4376d5d6befe5c24d503f10ff136d9e0c49f9127a4279fd110b727929a5aa9  trivy_0.70.0_Linux-64bit.tar.gz
