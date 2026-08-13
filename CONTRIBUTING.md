@@ -11,8 +11,8 @@ before opening a pull request here.
 
 1. Create a branch off `main` named `users/<your_name>/<short-description>`
    (e.g. `users/jdoe/add-trivy-scanner`) for your change.
-2. Make your change, following the conventions below.
-3. Open a pull request against `main`. Fill in the PR template completely;
+1. Make your change, following the conventions below.
+1. Open a pull request against `main`. Fill in the PR template completely;
    reviewers use the "Technical Details" and "Test Plan"/"Test Result"
    sections to understand *why* a change was made and how it was verified.
 
