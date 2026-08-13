@@ -29,6 +29,16 @@ different things:
   `contents: read` and `security-events: write` so findings land in
   Security -> Code scanning.
 
+### Binary integrity
+
+`security_scanners/github_actions/gitleaks.py` downloads the gitleaks
+release tarball from a pinned S3 mirror and verifies it against
+`checksums.sha256` (a repo-root file shared across all scanners that
+download a binary, e.g. gitleaks, trivy) before extracting or executing
+anything, via the shared `binary_checksums.py` helper. A digest mismatch
+(or a missing/malformed checksums file) makes the scan job fail closed
+rather than run an unverified binary.
+
 ### Consuming this workflow from another repo
 
 1. Add a PR-time job (can live alongside a `zizmor` job in the same

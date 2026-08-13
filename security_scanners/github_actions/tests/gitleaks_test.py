@@ -4,6 +4,8 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,8 @@ sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from gitleaks import (
     _CONFIG_PATH,
     _LEAK_SECURITY_SEVERITY_HIGH,
+    _ReportTarget,
+    _SUPPORTED_FORMATS,
     _determine_log_opts,
     _enrich_sarif_with_security_severity,
     _GithubActionsApi,
@@ -20,6 +24,8 @@ from gitleaks import (
     _md_code_fence,
     _parse_report_formats,
     _resolve_config_path,
+    _run_gitleaks,
+    get_gitleaks_binary,
     main,
 )
 
@@ -369,6 +375,84 @@ class MdCodeFenceTest(unittest.TestCase):
         self.assertNotIn(fence, content)
         self.assertTrue(block.startswith(fence + "\n"))
         self.assertTrue(block.endswith("\n" + fence))
+
+
+class RedactionRegressionTest(unittest.TestCase):
+    """Regression test: a real secret's literal value must never reach any
+    generated report, in any supported format, when `--redact` is passed.
+
+    Runs the real, network-downloaded gitleaks binary end-to-end through
+    this module's own `_run_gitleaks`/`_parse_report_formats` against a
+    throwaway repo containing one fixture secret -- i.e. exactly the code
+    path `main()` uses, not a reimplementation of it. Skips (rather than
+    failing) when the binary can't be obtained, so offline/sandboxed
+    environments don't get a false failure; re-run this whenever
+    `_GITLEAKS_VERSION` is bumped, since redaction behavior is entirely
+    upstream gitleaks' responsibility.
+    """
+
+    # Structurally matches gitleaks' built-in `slack-webhook-url` rule
+    # (a fixed literal path shape, no entropy heuristic involved), so
+    # detection stays reliable across gitleaks versions.
+    FIXTURE_SECRET = (
+        "https://hooks.slack.com/services/T00000000/B00000000/"
+        "fixturefixturefixturefix"
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.binary = get_gitleaks_binary()
+        except Exception as exc:  # environment-dependent: no/blocked network, etc.
+            raise unittest.SkipTest(f"gitleaks binary unavailable: {exc}")
+
+    def setUp(self):
+        self._repo_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._repo_dir, ignore_errors=True)
+        self._reports_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._reports_dir, ignore_errors=True)
+
+        self._git("init", "-q")
+        self._git("config", "user.email", "test@example.invalid")
+        self._git("config", "user.name", "gitleaks redaction test")
+        (self._repo_dir / "fixture.env").write_text(
+            f"SLACK_WEBHOOK_URL={self.FIXTURE_SECRET}\n", encoding="utf-8"
+        )
+        self._git("add", "-A")
+        self._git("commit", "-q", "-m", "add fixture secret")
+
+    def _git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=self._repo_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_redact_hides_secret_in_every_report_format(self):
+        targets = [
+            _ReportTarget(fmt=fmt, path=self._reports_dir / f"report.{ext}")
+            for fmt, ext in sorted(_SUPPORTED_FORMATS.items())
+        ]
+        leaks_found = _run_gitleaks(
+            self.binary,
+            targets,
+            config_path=_resolve_config_path(),
+            log_opts="",
+            source_dir=self._repo_dir,
+        )
+        self.assertTrue(leaks_found, "fixture secret was not detected at all")
+        for target in targets:
+            self.assertTrue(
+                target.path.is_file(), f"no report written for {target.fmt}"
+            )
+            content = target.path.read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn(
+                self.FIXTURE_SECRET,
+                content,
+                f"fixture secret leaked into un-redacted {target.fmt} report",
+            )
 
 
 if __name__ == "__main__":

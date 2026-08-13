@@ -87,7 +87,7 @@ jobs:
           # keeps this fast since TheRock is a large repo and only this
           # one file is needed.
           repository: ROCm/TheRock
-          ref: main
+          ref: 47947a1b1f93647eaf66963cc05ca2dfb1b65243 # 2026-08-13
           fetch-depth: 1
           sparse-checkout: |
             build_tools/github_actions/github_actions_api.py

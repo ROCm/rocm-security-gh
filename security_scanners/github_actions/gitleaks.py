@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import NamedTuple, TypedDict, cast
 from urllib.request import Request, urlopen
 
+from binary_checksums import CHECKSUMS_FILENAME, expected_sha256
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 log = logging.getLogger(__name__)
@@ -88,15 +90,9 @@ _SUPPORTED_FORMATS: dict[str, str] = {
 }
 # Mirrored to the rocm-third-party-deps S3 bucket (see
 # docs/development/git_chores.md) so CI doesn't depend on github.com.
-# Original source: https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
 _GITLEAKS_VERSION = "8.30.1"
-_GITLEAKS_TARBALL_URL = (
-    "https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/"
-    f"gitleaks_{_GITLEAKS_VERSION}_linux_x64.tar.gz"
-)
-_GITLEAKS_TARBALL_SHA256 = (
-    "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
-)
+_GITLEAKS_TARBALL_FILENAME = f"gitleaks_{_GITLEAKS_VERSION}_linux_x64.tar.gz"
+_GITLEAKS_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_GITLEAKS_TARBALL_FILENAME}"
 _GITLEAKS_MAX_TARBALL_BYTES = 100 * 1024 * 1024  # 100 MiB guardrail
 _CONFIG_PATH = "gitleaks.toml"
 # Pin --exit-code to 1 so we can tell clean (0) from leaks (1) from a
@@ -160,6 +156,8 @@ def get_gitleaks_binary() -> Path:
         log.info("Found gitleaks binary at %s", binary)
         return binary
 
+    expected_sha = expected_sha256(REPO_ROOT, _GITLEAKS_TARBALL_FILENAME)
+
     install_dir.mkdir(parents=True, exist_ok=True)
     log.info(
         "Downloading gitleaks v%s from %s",
@@ -185,11 +183,12 @@ def get_gitleaks_binary() -> Path:
                 written += len(chunk)
                 chunk = resp.read(1024 * 1024)
         actual_sha = _sha256_of(tarball_path)
-        if actual_sha != _GITLEAKS_TARBALL_SHA256:
+        if actual_sha != expected_sha:
             raise RuntimeError(
-                f"gitleaks tarball SHA256 mismatch: expected "
-                f"{_GITLEAKS_TARBALL_SHA256}, got {actual_sha} "
-                f"(downloaded from {_GITLEAKS_TARBALL_URL})"
+                f"gitleaks tarball SHA256 mismatch: expected {expected_sha} "
+                f"(from {CHECKSUMS_FILENAME}), got {actual_sha} "
+                f"(downloaded from {_GITLEAKS_TARBALL_URL}). Refusing to "
+                "use this binary."
             )
         with tarfile.open(tarball_path, mode="r:gz") as tar:
             # filter="data" rejects unsafe members (traversal, abs paths, devices).
