@@ -14,6 +14,7 @@ sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from zizmor import (
     _CONFIG_PATH,
     _SEVERITY_ORDER,
+    _ZIZMOR_VERSION,
     _determine_changed_audited_files,
     _diff_range,
     _enrich_sarif_with_security_severity,
@@ -24,6 +25,7 @@ from zizmor import (
     _resolve_config_path,
     _tally_findings_by_severity,
     _tally_findings_from_sarif,
+    get_zizmor_binary,
     main,
 )
 
@@ -90,8 +92,8 @@ class MainTest(unittest.TestCase):
             self.assertEqual(main([]), 2)
 
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
-        # _ensure_zizmor()/_run_zizmor() can fail with exception types
-        # other than RuntimeError (e.g. OSError from a pip/network
+        # get_zizmor_binary()/_run_zizmor() can fail with exception types
+        # other than RuntimeError (e.g. OSError from a download/network
         # failure); those must still map to exit code 2 per this
         # module's documented contract, not escape main() as an
         # unhandled exception.
@@ -101,7 +103,7 @@ class MainTest(unittest.TestCase):
                 return_value=self._stub_gha(),
             ),
             mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
-            mock.patch("zizmor._ensure_zizmor", side_effect=OSError("network down")),
+            mock.patch("zizmor.get_zizmor_binary", side_effect=OSError("network down")),
         ):
             self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
 
@@ -119,7 +121,7 @@ class MainTest(unittest.TestCase):
             ),
             mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
             mock.patch(
-                "zizmor._ensure_zizmor",
+                "zizmor.get_zizmor_binary",
                 side_effect=RuntimeError("failed to install zizmor"),
             ),
         ):
@@ -446,6 +448,80 @@ class ResolveConfigPathTest(unittest.TestCase):
     def test_raises_when_missing(self):
         with self.assertRaises(FileNotFoundError):
             _resolve_config_path()
+
+
+class GetZizmorBinaryTest(unittest.TestCase):
+    """Tests for `get_zizmor_binary`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"RUNNER_TEMP": str(self._tmp_root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._install_dir = self._tmp_root / f"zizmor-{_ZIZMOR_VERSION}"
+        self._binary = self._install_dir / "zizmor"
+
+    def _fake_download(self, **_kwargs) -> Path:
+        self._install_dir.mkdir(parents=True, exist_ok=True)
+        self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        return self._binary
+
+    def test_returns_cached_binary_without_downloading(self):
+        self._install_dir.mkdir(parents=True)
+        self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        self._binary.chmod(0o755)
+        with mock.patch("zizmor.download_and_verify_tarball") as download:
+            result = get_zizmor_binary()
+        download.assert_not_called()
+        self.assertEqual(result, self._binary)
+
+    def test_downloads_verifies_and_checks_version(self):
+        with (
+            mock.patch("zizmor.expected_sha256", return_value="a" * 64) as exp_sha,
+            mock.patch(
+                "zizmor.download_and_verify_tarball", side_effect=self._fake_download
+            ) as download,
+            mock.patch(
+                "zizmor.subprocess.run",
+                return_value=mock.Mock(
+                    returncode=0, stdout=f"zizmor {_ZIZMOR_VERSION}\n"
+                ),
+            ),
+        ):
+            result = get_zizmor_binary()
+        exp_sha.assert_called_once()
+        download.assert_called_once()
+        self.assertEqual(result, self._binary)
+        self.assertTrue(os.access(self._binary, os.X_OK))
+
+    def test_version_mismatch_raises(self):
+        with (
+            mock.patch("zizmor.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "zizmor.download_and_verify_tarball", side_effect=self._fake_download
+            ),
+            mock.patch(
+                "zizmor.subprocess.run",
+                return_value=mock.Mock(returncode=0, stdout="zizmor 0.0.1\n"),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_zizmor_binary()
+        self.assertIn("0.0.1", str(ctx.exception))
+
+    def test_binary_fails_to_execute_raises(self):
+        with (
+            mock.patch("zizmor.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "zizmor.download_and_verify_tarball", side_effect=self._fake_download
+            ),
+            mock.patch("zizmor.subprocess.run", side_effect=OSError("cannot execute")),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_zizmor_binary()
+        self.assertIn("failed to execute", str(ctx.exception))
 
 
 if __name__ == "__main__":

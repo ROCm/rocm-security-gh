@@ -8,6 +8,15 @@ The repository includes:
 
 All ROCm repository owners and maintainers should adopt these workflows and security controls to improve security posture, reduce risk, and maintain consistent governance across the ROCm ecosystem.
 
+## Binary integrity
+
+Scanner scripts that download a pinned release tarball at run time (e.g.
+`gitleaks.py`, `zizmor.py`, `trivy.py`) verify it against the repo-root
+`checksums.sha256` file, via the shared `binary_checksums.py` helper,
+before extracting or executing anything. A digest mismatch (or a
+missing/malformed checksums file) makes the scan job fail closed rather
+than run an unverified binary.
+
 ## Zizmor
 
 `.github/workflows/zizmor.yml` is a `workflow_call` reusable workflow that

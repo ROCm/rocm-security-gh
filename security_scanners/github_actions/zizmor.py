@@ -30,13 +30,15 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+
+from binary_checksums import download_and_verify_tarball, expected_sha256
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -90,6 +92,15 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "github": "txt",
 }
 _ZIZMOR_VERSION = "1.24.1"
+# Mirrored to the rocm-third-party-deps S3 bucket (see
+# docs/development/git_chores.md) so CI doesn't depend on github.com.
+# Unlike gitleaks'/trivy's release assets, zizmor's own filename doesn't
+# embed a version, and it's mirrored under that same unversioned name --
+# so a version bump MUST re-verify and replace both the mirrored object
+# and this filename's `checksums.sha256` entry together in the same PR;
+# the old digest would otherwise silently keep "matching" a stale binary.
+_ZIZMOR_TARBALL_FILENAME = "zizmor-x86_64-unknown-linux-gnu.tar.gz"
+_ZIZMOR_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_ZIZMOR_TARBALL_FILENAME}"
 _CONFIG_PATH = "zizmor.yml"
 # Ascending severity order; threshold comparisons rely on it.
 _SEVERITY_ORDER: tuple[str, ...] = ("INFORMATIONAL", "LOW", "MEDIUM", "HIGH")
@@ -156,52 +167,54 @@ def _emit_non_sarif_reports(
         gha_append_step_summary("\n\n".join(summary_chunks))
 
 
-def _ensure_zizmor() -> Path:
-    spec = f"zizmor=={_ZIZMOR_VERSION}"
-    log.info("Installing %s", spec)
-    # Pinned to an exact release rather than a floating range; no
-    # `--upgrade` since a fresh runner never has a stale zizmor to
-    # replace. Going further with `--require-hashes --hash=...` to
-    # mitigate CDN-level tampering between PyPI and the runner was
-    # discussed upstream (see ROCm/TheRock#5900) but deferred: it adds a
-    # per-platform-wheel maintenance burden that hasn't been justified
-    # yet. Revisit if that changes.
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--quiet", spec],
-            check=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f"Failed to install {spec}: {exc}") from exc
+def get_zizmor_binary() -> Path:
+    """Return a verified zizmor binary in RUNNER_TEMP/zizmor-<ver>.
 
-    # Console scripts land next to sys.executable, even for an unactivated venv.
-    binary_path = Path(sys.executable).parent / "zizmor"
-    if not binary_path.is_file():
-        found = shutil.which("zizmor")
-        if found is None:
-            raise RuntimeError(
-                f"zizmor CLI not found at {binary_path} or on PATH after "
-                f"installing {spec}; is the active Python environment writable?"
-            )
-        binary_path = Path(found)
+    Downloads and validates it if missing. Previously this installed
+    zizmor from PyPI via `pip install`; that relied on PyPI/pip's own
+    (unauthenticated-by-us) TLS chain with no independent integrity
+    check on our side. Downloading the same upstream-published release
+    tarball used for gitleaks/trivy and verifying it against this repo's
+    `checksums.sha256` (see `binary_checksums.py`) covers this the same
+    way, end to end.
+    """
+    install_root = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
+    install_dir = install_root / f"zizmor-{_ZIZMOR_VERSION}"
+    binary = install_dir / "zizmor"
+    if binary.is_file() and os.access(binary, os.X_OK):
+        log.info("Found zizmor binary at %s", binary)
+        return binary
+
+    expected_sha = expected_sha256(REPO_ROOT, _ZIZMOR_TARBALL_FILENAME)
+    log.info("Downloading zizmor v%s from %s", _ZIZMOR_VERSION, _ZIZMOR_TARBALL_URL)
+    download_and_verify_tarball(
+        url=_ZIZMOR_TARBALL_URL,
+        expected_sha256=expected_sha,
+        member_name="zizmor",
+        install_dir=install_dir,
+    )
+    binary.chmod(0o755)
 
     try:
         result = subprocess.run(
-            [str(binary_path), "--version"],
+            [str(binary), "--version"],
             check=True,
             capture_output=True,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(
-            f"zizmor at {binary_path} failed to execute after install: {exc}"
+            f"zizmor at {binary} failed to execute after install: {exc}"
         ) from exc
-    log.info(
-        "Installed %s at %s",
-        result.stdout.strip().splitlines()[0] if result.stdout.strip() else "zizmor",
-        binary_path,
-    )
-    return binary_path
+    # zizmor prints "zizmor <version>", unlike gitleaks' "v<version>".
+    installed_version = result.stdout.strip().rsplit(maxsplit=1)[-1]
+    if installed_version != _ZIZMOR_VERSION:
+        raise RuntimeError(
+            f"zizmor at {binary} reports version {installed_version!r}, "
+            f"expected {_ZIZMOR_VERSION!r}"
+        )
+    log.info("Installed zizmor %s at %s", installed_version, binary)
+    return binary
 
 
 def _parse_report_formats(raw: str) -> list[_ReportTarget]:
@@ -742,7 +755,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     try:
-        binary = _ensure_zizmor()
+        binary = get_zizmor_binary()
         counts = _run_zizmor(
             binary,
             targets,
@@ -774,11 +787,11 @@ def main(argv: list[str]) -> int:
         _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2
     except Exception:
-        # _ensure_zizmor()/_run_zizmor() can also fail with exception
-        # types other than RuntimeError (e.g. OSError from a pip/network
-        # failure); the documented contract maps every scanner failure
-        # to exit code 2, so this is a deliberately broad catch-all at
-        # main()'s top-level error boundary.
+        # get_zizmor_binary()/_run_zizmor() can also fail with exception
+        # types other than RuntimeError (e.g. OSError from a download/
+        # network failure); the documented contract maps every scanner
+        # failure to exit code 2, so this is a deliberately broad
+        # catch-all at main()'s top-level error boundary.
         log.exception("zizmor install or scan failed unexpectedly")
         _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2
