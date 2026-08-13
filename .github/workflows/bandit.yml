@@ -96,7 +96,13 @@ jobs:
           # keeps this fast since TheRock is a large repo and only this
           # one file is needed.
           repository: ROCm/TheRock
-          ref: main
+          # Pinned to a commit SHA, not a floating `main`: this job runs
+          # with `security-events: write` on trusted/scheduled triggers,
+          # so a floating ref would let any future TheRock `main` commit
+          # -- unreviewed by us -- execute here. Bump deliberately by
+          # reviewing the diff of `build_tools/github_actions/github_actions_api.py`
+          # between the old and new SHA before updating this line.
+          ref: 47947a1b1f93647eaf66963cc05ca2dfb1b65243 # 2026-08-13
           fetch-depth: 1
           sparse-checkout: |
             build_tools/github_actions/github_actions_api.py

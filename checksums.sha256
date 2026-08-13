@@ -1,0 +1,12 @@
+# SHA-256 checksums for third-party scanner artifacts downloaded at run
+# time (gitleaks, trivy, zizmor, bandit, ...). One line per release:
+# "<digest>  <filename>" (sha256sum format). A mismatch means the
+# artifact is not used.
+#
+# Before adding an entry, verify the artifact against its own project's
+# published checksum/signature. Precede each entry with a comment linking
+# to where it was downloaded from, so the digest is traceable back to its
+# source. Remove entries no longer referenced.
+
+# Original source: https://files.pythonhosted.org/packages/aa/c3/0cb80dfe0f3076e5da7e4c5ad8e57bac6ac357ff4a6406205501cade4965/bandit-1.9.4.tar.gz
+b589e5de2afe70bd4d53fa0c1da6199f4085af666fde00e8a034f152a52cd628  bandit-1.9.4.tar.gz

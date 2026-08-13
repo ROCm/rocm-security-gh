@@ -32,10 +32,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
+
+from binary_checksums import download_and_verify_file, expected_sha256
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -85,6 +88,15 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "txt": "txt",
 }
 _BANDIT_VERSION = "1.9.4"
+_BANDIT_EXTRAS = "sarif"
+# PyPI sdist filenames are always version-qualified, unlike some other
+# scanners' release assets, so bumping _BANDIT_VERSION naturally points
+# this at a distinct checksums.sha256 entry -- no risk of an old digest
+# silently matching a new binary under a reused, unversioned filename.
+_BANDIT_SDIST_FILENAME = f"bandit-{_BANDIT_VERSION}.tar.gz"
+_BANDIT_SDIST_URL = (
+    f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_BANDIT_SDIST_FILENAME}"
+)
 _CONFIG_PATH = "bandit.yaml"
 # Bandit exits with this code when it finds any issue at/above the
 # --severity-level; we always scan at low, so it just means "any finding".
@@ -142,15 +154,40 @@ def _emit_non_sarif_reports(
         gha_append_step_summary("\n\n".join(summary_chunks))
 
 
-def _ensure_bandit() -> Path:
-    """Install the pinned `bandit[sarif]` release and return its CLI path.
+def get_bandit_binary() -> Path:
+    """Download, verify, install the pinned bandit release, and return its CLI path.
+
+    Unlike gitleaks/zizmor (statically-linked release binaries), bandit
+    ships as a pure-Python package with its own runtime dependencies
+    (PyYAML, stevedore, rich, pbr, plus sarif-om/jschema-to-python for
+    the `sarif` extra). Rather than letting `pip install bandit[sarif]==...`
+    resolve and fetch the bandit sdist itself straight from PyPI on
+    pip's own (unaudited-by-us) TLS chain, this downloads that exact
+    source tarball from a pinned S3 mirror, verifies it against this
+    repo's `checksums.sha256` (see `binary_checksums.py`), and only then
+    hands the verified local file to pip, which builds and installs it
+    (bandit has no compiled extensions, so a pure-Python sdist build is
+    a normal, fast `pip install`). pip still resolves bandit's
+    *dependencies* from PyPI as before -- only the security-critical
+    bandit code itself gets an independent integrity check here.
 
     Pinned to an exact release rather than a floating range; no
     `--upgrade` since a fresh runner never has a stale bandit to
     replace. Smoke-tests the binary afterwards so we fail fast if the
     install left a half-broken state.
     """
-    spec = f"bandit[sarif]=={_BANDIT_VERSION}"
+    install_root = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
+    sdist_path = install_root / _BANDIT_SDIST_FILENAME
+    if not sdist_path.is_file():
+        expected_sha = expected_sha256(REPO_ROOT, _BANDIT_SDIST_FILENAME)
+        log.info("Downloading bandit v%s from %s", _BANDIT_VERSION, _BANDIT_SDIST_URL)
+        download_and_verify_file(
+            url=_BANDIT_SDIST_URL,
+            expected_sha256=expected_sha,
+            dest_path=sdist_path,
+        )
+
+    spec = f"{sdist_path}[{_BANDIT_EXTRAS}]"
     log.info("Installing %s", spec)
     try:
         subprocess.run(
@@ -182,11 +219,16 @@ def _ensure_bandit() -> Path:
         raise RuntimeError(
             f"bandit at {binary_path} failed to execute after install: {exc}"
         ) from exc
-    log.info(
-        "Installed %s at %s",
-        result.stdout.strip().splitlines()[0] if result.stdout.strip() else "bandit",
-        binary_path,
-    )
+    # `bandit --version` prints "bandit <version>" as its first line,
+    # followed by extra lines (python version, etc).
+    first_line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    installed_version = first_line.rsplit(maxsplit=1)[-1] if first_line else ""
+    if installed_version != _BANDIT_VERSION:
+        raise RuntimeError(
+            f"bandit at {binary_path} reports version {installed_version!r}, "
+            f"expected {_BANDIT_VERSION!r}"
+        )
+    log.info("Installed bandit %s at %s", installed_version, binary_path)
     return binary_path
 
 
@@ -650,7 +692,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     try:
-        binary = _ensure_bandit()
+        binary = get_bandit_binary()
         counts = _run_bandit(
             binary,
             targets,
@@ -675,7 +717,7 @@ def main(argv: list[str]) -> int:
         _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
         return 2
     except Exception:
-        # _ensure_bandit()/_run_bandit() can also fail with exception
+        # get_bandit_binary()/_run_bandit() can also fail with exception
         # types other than RuntimeError (e.g. OSError from a pip/network
         # failure); the documented contract maps every scanner failure
         # to exit code 2, so this is a deliberately broad catch-all at

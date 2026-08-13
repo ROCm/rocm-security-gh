@@ -12,6 +12,8 @@ from unittest import mock
 
 sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from bandit import (
+    _BANDIT_SDIST_FILENAME,
+    _BANDIT_VERSION,
     _CONFIG_PATH,
     _SEVERITY_ORDER,
     _determine_changed_python_files,
@@ -22,6 +24,7 @@ from bandit import (
     _parse_report_formats,
     _resolve_config_path,
     _tally_findings_by_severity,
+    get_bandit_binary,
     main,
 )
 
@@ -88,7 +91,7 @@ class MainTest(unittest.TestCase):
             self.assertEqual(main([]), 2)
 
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
-        # _ensure_bandit()/_run_bandit() can fail with exception types
+        # get_bandit_binary()/_run_bandit() can fail with exception types
         # other than RuntimeError (e.g. OSError from a pip/network
         # failure); those must still map to exit code 2 per this
         # module's documented contract, not escape main() as an
@@ -99,7 +102,7 @@ class MainTest(unittest.TestCase):
                 return_value=self._stub_gha(),
             ),
             mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
-            mock.patch("bandit._ensure_bandit", side_effect=OSError("network down")),
+            mock.patch("bandit.get_bandit_binary", side_effect=OSError("network down")),
         ):
             self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
 
@@ -117,7 +120,7 @@ class MainTest(unittest.TestCase):
             ),
             mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
             mock.patch(
-                "bandit._ensure_bandit",
+                "bandit.get_bandit_binary",
                 side_effect=RuntimeError("failed to install bandit"),
             ),
         ):
@@ -152,7 +155,7 @@ class MainTest(unittest.TestCase):
                     mock.patch(
                         "bandit._resolve_config_path", return_value="bandit.yaml"
                     ),
-                    mock.patch("bandit._ensure_bandit", return_value=Path("bandit")),
+                    mock.patch("bandit.get_bandit_binary", return_value=Path("bandit")),
                     mock.patch("bandit._run_bandit", side_effect=fake_run_bandit),
                 ):
                     rc = main(
@@ -446,6 +449,134 @@ class ResolveConfigPathTest(unittest.TestCase):
     def test_raises_when_missing(self):
         with self.assertRaises(FileNotFoundError):
             _resolve_config_path()
+
+
+class GetBanditBinaryTest(unittest.TestCase):
+    """Tests for `get_bandit_binary`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"RUNNER_TEMP": str(self._tmp_root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self._sdist_path = self._tmp_root / _BANDIT_SDIST_FILENAME
+        self._binary = self._tmp_root / "bandit"
+
+    def _fake_download(self, *, dest_path, **_kwargs) -> Path:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_bytes(b"fake sdist contents")
+        return dest_path
+
+    def test_reuses_cached_sdist_without_redownloading(self):
+        self._sdist_path.write_bytes(b"already downloaded")
+        with (
+            mock.patch("bandit.download_and_verify_file") as download,
+            mock.patch("bandit.subprocess.run") as run,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0),  # pip install
+                mock.Mock(
+                    returncode=0, stdout=f"bandit {_BANDIT_VERSION}\n"
+                ),  # --version
+            ]
+            with mock.patch("bandit.sys.executable", str(self._tmp_root / "python")):
+                self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                get_bandit_binary()
+        download.assert_not_called()
+
+    def test_downloads_verifies_installs_and_checks_version(self):
+        with (
+            mock.patch("bandit.expected_sha256", return_value="a" * 64) as exp_sha,
+            mock.patch(
+                "bandit.download_and_verify_file", side_effect=self._fake_download
+            ) as download,
+            mock.patch("bandit.subprocess.run") as run,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0),  # pip install
+                mock.Mock(
+                    returncode=0, stdout=f"bandit {_BANDIT_VERSION}\n"
+                ),  # --version
+            ]
+            with mock.patch("bandit.sys.executable", str(self._tmp_root / "python")):
+                self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                result = get_bandit_binary()
+        exp_sha.assert_called_once()
+        download.assert_called_once()
+        install_cmd = run.call_args_list[0].args[0]
+        self.assertIn(f"{self._sdist_path}[sarif]", install_cmd)
+        self.assertEqual(result, self._binary)
+
+    def test_pip_install_failure_raises(self):
+        with (
+            mock.patch("bandit.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "bandit.download_and_verify_file", side_effect=self._fake_download
+            ),
+            mock.patch(
+                "bandit.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["pip"]),
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                get_bandit_binary()
+        self.assertIn("Failed to install", str(ctx.exception))
+
+    def test_version_mismatch_raises(self):
+        with (
+            mock.patch("bandit.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "bandit.download_and_verify_file", side_effect=self._fake_download
+            ),
+            mock.patch("bandit.subprocess.run") as run,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0),  # pip install
+                mock.Mock(returncode=0, stdout="bandit 0.0.1\n"),  # --version
+            ]
+            with mock.patch("bandit.sys.executable", str(self._tmp_root / "python")):
+                self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                with self.assertRaises(RuntimeError) as ctx:
+                    get_bandit_binary()
+        self.assertIn("0.0.1", str(ctx.exception))
+
+    def test_version_line_with_extra_output_is_parsed(self):
+        # Real `bandit --version` output has extra lines (python version,
+        # etc) after the "bandit <version>" line.
+        with (
+            mock.patch("bandit.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "bandit.download_and_verify_file", side_effect=self._fake_download
+            ),
+            mock.patch("bandit.subprocess.run") as run,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0),  # pip install
+                mock.Mock(
+                    returncode=0,
+                    stdout=f"bandit {_BANDIT_VERSION}\n  python version = 3.12.0\n",
+                ),  # --version
+            ]
+            with mock.patch("bandit.sys.executable", str(self._tmp_root / "python")):
+                self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
+                result = get_bandit_binary()
+        self.assertEqual(result, self._binary)
+
+    def test_binary_not_found_after_install_raises(self):
+        with (
+            mock.patch("bandit.expected_sha256", return_value="a" * 64),
+            mock.patch(
+                "bandit.download_and_verify_file", side_effect=self._fake_download
+            ),
+            mock.patch("bandit.subprocess.run", return_value=mock.Mock(returncode=0)),
+            mock.patch("bandit.shutil.which", return_value=None),
+        ):
+            with mock.patch("bandit.sys.executable", str(self._tmp_root / "python")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    get_bandit_binary()
+        self.assertIn("bandit CLI not found", str(ctx.exception))
 
 
 if __name__ == "__main__":
