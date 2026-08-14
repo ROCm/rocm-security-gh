@@ -1,2 +1,15 @@
+# Python
 __pycache__/
-*.pyc
+.pytest_cache/
+
+# AI
+.claude/
+.cursor/
+.cline/
+.codex/
+
+# IDE
+.vscode/
+
+# virtual envs
+.venv*/
