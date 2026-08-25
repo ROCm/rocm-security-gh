@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from security_scanners.utils.compute_pr_depth import compute_fetch_depth, main
@@ -30,19 +27,13 @@ class ComputeFetchDepthTest(unittest.TestCase):
         self.assertEqual(compute_fetch_depth({}), "0")
 
     def test_push_payload_returns_full_history(self):
-        self.assertEqual(
-            compute_fetch_depth({"before": "abc123"}), "0"
-        )
+        self.assertEqual(compute_fetch_depth({"before": "abc123"}), "0")
 
     def test_non_dict_pull_request_returns_full_history(self):
-        self.assertEqual(
-            compute_fetch_depth({"pull_request": None}), "0"
-        )
+        self.assertEqual(compute_fetch_depth({"pull_request": None}), "0")
 
     def test_missing_commits_returns_full_history(self):
-        self.assertEqual(
-            compute_fetch_depth({"pull_request": {}}), "0"
-        )
+        self.assertEqual(compute_fetch_depth({"pull_request": {}}), "0")
 
     def test_zero_commits_returns_full_history(self):
         self.assertEqual(
