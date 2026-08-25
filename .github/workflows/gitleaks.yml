@@ -74,7 +74,8 @@ jobs:
         with:
           # job.workflow_repository / job.workflow_sha identify the repo
           # and exact commit that *this* reusable workflow file was called
-          # at/from, regardless of which repo called it.
+          # at/from, regardless of which repo called it. Valid job-context
+          # properties; actionlint ignore is in .github/actionlint.yaml.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           persist-credentials: false

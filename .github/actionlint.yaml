@@ -1,0 +1,7 @@
+# actionlint v1.7.x does not yet model job.workflow_repository /
+# job.workflow_sha (added to GitHub Actions for reusable workflows).
+# See https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
+paths:
+  .github/workflows/gitleaks.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined'
