@@ -1,7 +1,9 @@
 # rocm-security-gh
+
 This repository serves as the central source for ROCm security and governance automation. It provides reusable GitHub Actions workflows, security scanning integrations, and governance configurations to help ROCm repositories implement consistent security controls and comply with organizational and regulatory requirements.
 
 The repository includes:
+
 - Reusable GitHub Actions workflows
 - Security scanning integrations and configurations (e.g., CodeQL, Gitleaks, Trivy, Zizmor)
 - Best practices for secure software development and repository management
@@ -12,7 +14,8 @@ All ROCm repository owners and maintainers should adopt these workflows and secu
 
 Scanner scripts that download a pinned release tarball at run time (e.g.
 `gitleaks.py`, `zizmor.py`, `trivy.py`) verify it against the repo-root
-`checksums.sha256` file, via the shared `binary_checksums.py` helper,
+`checksums.sha256` file, via the shared
+`security_scanners/utils/binary_checksums.py` helper,
 before extracting or executing anything. A digest mismatch (or a
 missing/malformed checksums file) makes the scan job fail closed rather
 than run an unverified binary.
@@ -57,7 +60,7 @@ different things:
          report_formats: plain
    ```
 
-2. Add a scheduled job that uploads to the Security tab (sibling
+1. Add a scheduled job that uploads to the Security tab (sibling
    scanners, e.g. `gitleaks`, can live in the same workflow -- see
    `weekly_security.yml` below). Grant `security-events: write` on the
    `uses:` job itself -- the top-level `permissions:` block above it is

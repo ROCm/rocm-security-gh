@@ -2,16 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
-import os
-from pathlib import Path
-import sys
-import tarfile
 import tempfile
+import tarfile
 import unittest
+from pathlib import Path
 
-sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
-from binary_checksums import (
+from security_scanners.utils.binary_checksums import (
     CHECKSUMS_FILENAME,
+    download_and_verify_file,
     download_and_verify_tarball,
     expected_sha256,
     sha256_of,
@@ -50,10 +48,10 @@ class ExpectedSha256Test(unittest.TestCase):
     def test_multiple_tools_coexist(self):
         self._write_checksums(
             f"{self._VALID_DIGEST}  gitleaks_8.30.1_linux_x64.tar.gz\n"
-            f"{'b' * 64}  trivy_0.70.0_Linux-64bit.tar.gz\n"
+            f"{'b' * 64}  bandit-1.9.4.tar.gz\n"
         )
         self.assertEqual(
-            expected_sha256(self._tmp_root, "trivy_0.70.0_Linux-64bit.tar.gz"),
+            expected_sha256(self._tmp_root, "bandit-1.9.4.tar.gz"),
             "b" * 64,
         )
 
@@ -91,6 +89,24 @@ class ExpectedSha256Test(unittest.TestCase):
         self._write_checksums("abc123  some_tool_1.0.0.tar.gz\n")
         with self.assertRaises(ValueError):
             expected_sha256(self._tmp_root, "some_tool_1.0.0.tar.gz")
+
+    def test_invalid_digest_on_other_line_raises(self):
+        self._write_checksums(
+            "not-hex  other-tool.tar.gz\n"
+            f"{self._VALID_DIGEST}  some_tool_1.0.0.tar.gz\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            expected_sha256(self._tmp_root, "some_tool_1.0.0.tar.gz")
+        self.assertIn("not a valid", str(ctx.exception))
+
+    def test_duplicate_conflicting_entries_raise(self):
+        self._write_checksums(
+            f"{self._VALID_DIGEST}  some_tool_1.0.0.tar.gz\n"
+            f"{'b' * 64}  some_tool_1.0.0.tar.gz\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            expected_sha256(self._tmp_root, "some_tool_1.0.0.tar.gz")
+        self.assertIn("conflicting checksum entries", str(ctx.exception))
 
 
 class Sha256OfTest(unittest.TestCase):
@@ -169,6 +185,58 @@ class DownloadAndVerifyTarballTest(unittest.TestCase):
                 max_bytes=10,
             )
         self.assertIn("exceeds", str(ctx.exception))
+
+
+class DownloadAndVerifyFileTest(unittest.TestCase):
+    """Tests for `download_and_verify_file`, using `file://` URLs so
+    these run fully offline."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _make_source_file(self, content: bytes) -> tuple[Path, str]:
+        source_path = self._tmp_root / "source" / "artifact.whl"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_bytes(content)
+        return source_path, sha256_of(source_path)
+
+    def test_writes_dest_on_matching_digest(self):
+        source_path, digest = self._make_source_file(b"wheel contents")
+        dest_path = self._tmp_root / "install" / "artifact.whl"
+        result = download_and_verify_file(
+            url=source_path.as_uri(),
+            expected_sha256=digest,
+            dest_path=dest_path,
+        )
+        self.assertEqual(result, dest_path)
+        self.assertEqual(dest_path.read_bytes(), b"wheel contents")
+
+    def test_mismatched_digest_raises_and_writes_nothing(self):
+        source_path, _ = self._make_source_file(b"payload")
+        dest_path = self._tmp_root / "install" / "artifact.whl"
+        with self.assertRaises(RuntimeError) as ctx:
+            download_and_verify_file(
+                url=source_path.as_uri(),
+                expected_sha256="0" * 64,
+                dest_path=dest_path,
+            )
+        self.assertIn("SHA256 mismatch", str(ctx.exception))
+        self.assertFalse(dest_path.exists())
+
+    def test_oversized_download_raises(self):
+        source_path, digest = self._make_source_file(b"x" * 1000)
+        dest_path = self._tmp_root / "install" / "artifact.whl"
+        with self.assertRaises(RuntimeError) as ctx:
+            download_and_verify_file(
+                url=source_path.as_uri(),
+                expected_sha256=digest,
+                dest_path=dest_path,
+                max_bytes=10,
+            )
+        self.assertIn("exceeds", str(ctx.exception))
+        self.assertFalse(dest_path.exists())
 
 
 if __name__ == "__main__":

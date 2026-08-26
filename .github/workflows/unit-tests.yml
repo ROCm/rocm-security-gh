@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Run scanner unit tests
@@ -28,4 +32,4 @@ jobs:
         run: pip install -r security_scanners/requirements-test.txt
 
       - name: Run unit tests
-        run: python -m pytest -vv build_tools security_scanners
+        run: python -m pytest -vv security_scanners

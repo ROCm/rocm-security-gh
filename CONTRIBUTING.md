@@ -11,8 +11,8 @@ before opening a pull request here.
 
 1. Create a branch off `main` named `users/<your_name>/<short-description>`
    (e.g. `users/jdoe/add-trivy-scanner`) for your change.
-2. Make your change, following the conventions below.
-3. Open a pull request against `main`. Fill in the PR template completely;
+1. Make your change, following the conventions below.
+1. Open a pull request against `main`. Fill in the PR template completely;
    reviewers use the "Technical Details" and "Test Plan"/"Test Result"
    sections to understand *why* a change was made and how it was verified.
 
@@ -27,11 +27,13 @@ Follow the [ROCm/TheRock style guides](https://github.com/ROCm/TheRock/tree/main
 
 ## Testing
 
-Scanner logic lives under `security_scanners/` with unit tests
-alongside it (`*_test.py`, run via `pytest`). Before opening a PR:
+Scanner logic lives under `security_scanners/`; shared helpers (checksum
+verification, GitHub Actions API wrappers, PR fetch-depth computation)
+live in `security_scanners/utils/` with unit tests alongside them
+(`*_test.py`, run via `pytest`). Before opening a PR:
 
 ```bash
-cd security_scanners
-pip install -r requirements-test.txt
-pytest
+# from repo root
+pip install -r security_scanners/requirements-test.txt
+python -m pytest security_scanners
 ```
