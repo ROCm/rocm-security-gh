@@ -4,13 +4,13 @@
 """Download and verify third-party scanner artifacts.
 
 Shared by every scanner script that downloads a release artifact at run
-time (gitleaks.py, trivy.py, zizmor.py, bandit.py, ...): each resolves
-its own artifact URL/filename and calls `download_and_verify_tarball()`
-(for a release tarball containing a single binary) or
-`download_and_verify_file()` (for a standalone file, e.g. a Python
-wheel), both of which look up the expected digest recorded in this
-repo's shared `checksums.sha256` and refuse to use the artifact on a
-mismatch.
+time (``security_scanners/github_actions/gitleaks.py``,
+``bandit.py``, ``trivy.py``, ``zizmor.py``, ...): each resolves its own
+artifact URL/filename and calls ``download_and_verify_tarball()`` (for a
+release tarball containing a single binary) or ``download_and_verify_file()``
+(for a standalone file, e.g. a Python wheel), both of which look up the
+expected digest recorded in this repo's shared ``checksums.sha256`` and
+refuse to use the artifact on a mismatch.
 """
 
 import hashlib
@@ -24,6 +24,45 @@ CHECKSUMS_FILENAME = "checksums.sha256"
 _SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 _DEFAULT_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024  # 100 MiB guardrail
 _DEFAULT_TIMEOUT_SECONDS = 60
+
+
+def _parse_checksum_entries(checksums_path: Path) -> dict[str, str]:
+    """Parse and validate every entry in ``checksums_path``.
+
+    Raises on structural errors, malformed digests, or duplicate filenames
+    with conflicting digests.
+    """
+    if not checksums_path.is_file():
+        raise FileNotFoundError(f"checksums file not found at '{checksums_path}'")
+
+    entries: dict[str, str] = {}
+    for lineno, raw_line in enumerate(
+        checksums_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError(
+                f"{checksums_path}:{lineno}: malformed line {raw_line!r} "
+                "(expected '<sha256>  <filename>')"
+            )
+        digest, entry_name = parts
+        entry_name = entry_name.lstrip("*")  # sha256sum binary-mode marker
+        if not _SHA256_HEX_RE.fullmatch(digest):
+            raise ValueError(
+                f"{checksums_path}:{lineno}: '{digest}' is not a valid "
+                "64-character lowercase hex SHA-256 digest"
+            )
+        previous = entries.get(entry_name)
+        if previous is not None and previous != digest:
+            raise ValueError(
+                f"{checksums_path}:{lineno}: conflicting checksum entries for "
+                f"'{entry_name}' ({previous} vs {digest})"
+            )
+        entries[entry_name] = digest
+    return entries
 
 
 def sha256_of(path: Path) -> str:
@@ -40,31 +79,13 @@ def expected_sha256(repo_root: Path, filename: str) -> str:
     block use of the artifact, not silently skip verification.
     """
     checksums_path = repo_root / CHECKSUMS_FILENAME
-    if not checksums_path.is_file():
-        raise FileNotFoundError(f"checksums file not found at '{checksums_path}'")
-    for lineno, raw_line in enumerate(
-        checksums_path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(maxsplit=1)
-        if len(parts) != 2:
-            raise ValueError(
-                f"{checksums_path}:{lineno}: malformed line {raw_line!r} "
-                "(expected '<sha256>  <filename>')"
-            )
-        digest, entry_name = parts
-        entry_name = entry_name.lstrip("*")  # sha256sum binary-mode marker
-        if entry_name != filename:
-            continue
-        if not _SHA256_HEX_RE.fullmatch(digest):
-            raise ValueError(
-                f"{checksums_path}:{lineno}: '{digest}' is not a valid "
-                "64-character lowercase hex SHA-256 digest"
-            )
-        return digest
-    raise ValueError(f"No checksum entry for '{filename}' in {checksums_path}")
+    entries = _parse_checksum_entries(checksums_path)
+    try:
+        return entries[filename]
+    except KeyError as exc:
+        raise ValueError(
+            f"No checksum entry for '{filename}' in {checksums_path}"
+        ) from exc
 
 
 def _download_to_file(
@@ -101,11 +122,11 @@ def download_and_verify_file(
 ) -> Path:
     """Download `url` to `dest_path`, verifying its SHA-256 before keeping it.
 
-    Unlike `download_and_verify_tarball()`, this doesn't extract
+    Unlike ``download_and_verify_tarball()``, this doesn't extract
     anything -- for artifacts that are used as-is (e.g. a Python wheel
-    handed to `pip install <path>`) rather than unpacked. The digest is
-    checked before `dest_path` is written; a mismatched digest or an
-    oversized download leaves no file behind and raises `RuntimeError`.
+    handed to ``pip install <path>``) rather than unpacked. The digest is
+    checked before ``dest_path`` is written; a mismatched digest or an
+    oversized download leaves no file behind and raises ``RuntimeError``.
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
@@ -141,12 +162,13 @@ def download_and_verify_tarball(
     """Download `url`, verify its SHA-256, then extract `member_name` into `install_dir`.
 
     The digest is checked before anything is extracted, so a mismatch
-    (or an oversized download) never reaches `tarfile`. Extraction uses
-    the `"data"` filter, which rejects absolute paths, `..` traversal,
+    (or an oversized download) never reaches ``tarfile``. Compression is
+    autodetected (``.tar.gz``, ``.tar.xz``, etc.) via ``mode="r:*"``.
+    Extraction uses the ``"data"`` filter, which rejects absolute paths, ``..`` traversal,
     device files, and most symlink tricks. Returns the path to the
-    extracted member; raises `RuntimeError` if the digest doesn't match,
-    the download exceeds `max_bytes`, or the tarball doesn't contain
-    `member_name`.
+    extracted member; raises ``RuntimeError`` if the digest doesn't match,
+    the download exceeds ``max_bytes``, or the tarball doesn't contain
+    ``member_name``.
     """
     install_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -162,7 +184,7 @@ def download_and_verify_tarball(
                 f"{CHECKSUMS_FILENAME}), got {actual_sha256} (downloaded "
                 f"from {url}). Refusing to use this artifact."
             )
-        with tarfile.open(tarball_path, mode="r:gz") as tar:
+        with tarfile.open(tarball_path, mode="r:*") as tar:
             member = tar.getmember(member_name)
             tar.extract(member, path=install_dir, filter="data")
     finally:

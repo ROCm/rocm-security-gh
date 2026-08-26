@@ -2,15 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
-import os
-from pathlib import Path
-import sys
-import tarfile
 import tempfile
+import tarfile
 import unittest
+from pathlib import Path
 
-sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
-from binary_checksums import (
+from security_scanners.utils.binary_checksums import (
     CHECKSUMS_FILENAME,
     download_and_verify_file,
     download_and_verify_tarball,
@@ -92,6 +89,24 @@ class ExpectedSha256Test(unittest.TestCase):
         self._write_checksums("abc123  some_tool_1.0.0.tar.gz\n")
         with self.assertRaises(ValueError):
             expected_sha256(self._tmp_root, "some_tool_1.0.0.tar.gz")
+
+    def test_invalid_digest_on_other_line_raises(self):
+        self._write_checksums(
+            "not-hex  other-tool.tar.gz\n"
+            f"{self._VALID_DIGEST}  some_tool_1.0.0.tar.gz\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            expected_sha256(self._tmp_root, "some_tool_1.0.0.tar.gz")
+        self.assertIn("not a valid", str(ctx.exception))
+
+    def test_duplicate_conflicting_entries_raise(self):
+        self._write_checksums(
+            f"{self._VALID_DIGEST}  some_tool_1.0.0.tar.gz\n"
+            f"{'b' * 64}  some_tool_1.0.0.tar.gz\n"
+        )
+        with self.assertRaises(ValueError) as ctx:
+            expected_sha256(self._tmp_root, "some_tool_1.0.0.tar.gz")
+        self.assertIn("conflicting checksum entries", str(ctx.exception))
 
 
 class Sha256OfTest(unittest.TestCase):
