@@ -12,14 +12,9 @@ Exit codes:
 
 Inputs come from CLI flags or matching `GITLEAKS_*` env vars set by the
 workflow.
-
-`gha_*` helpers (`gha_load_github_event`, `gha_set_output`,
-`gha_append_step_summary`) live in ROCm/TheRock's `github_actions_api`
-module rather than being duplicated here; see `_import_github_actions_api`.
 """
 
 import argparse
-import hashlib
 import json
 import logging
 import os
@@ -27,15 +22,18 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, TypedDict, cast
-from urllib.request import Request, urlopen
 
-from binary_checksums import CHECKSUMS_FILENAME, expected_sha256
+from security_scanners.utils.binary_checksums import (
+    CHECKSUMS_FILENAME,
+    download_and_verify_tarball,
+    expected_sha256,
+)
+from security_scanners.utils.github_actions_api import import_github_actions_api
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -43,41 +41,11 @@ log = logging.getLogger(__name__)
 
 
 class _GithubActionsApi(NamedTuple):
-    """The subset of ROCm/TheRock's `github_actions_api` module this script uses."""
+    """The subset of workflow-command helpers this script uses."""
 
     append_step_summary: Callable[[str], None]
     load_github_event: Callable[[], Mapping[str, object]]
     set_output: Callable[[Mapping[str, str]], None]
-
-
-def _import_github_actions_api() -> _GithubActionsApi:
-    """Import `gha_*` helpers from ROCm/TheRock's `github_actions_api` module.
-
-    Deferred (rather than a module-level import) so unit tests exercising
-    this module's pure scan/parsing logic don't need a TheRock checkout;
-    only `main()` needs these. The workflow checks out TheRock and points
-    THEROCK_BUILD_TOOLS_DIR at its `build_tools/` directory before running
-    this script.
-    """
-    therock_build_tools = os.environ.get("THEROCK_BUILD_TOOLS_DIR")
-    if not therock_build_tools:
-        raise RuntimeError(
-            "THEROCK_BUILD_TOOLS_DIR is not set; expected the workflow to "
-            "check out ROCm/TheRock and point this at its build_tools/ dir."
-        )
-    if therock_build_tools not in sys.path:
-        sys.path.insert(0, therock_build_tools)
-    from github_actions.github_actions_api import (
-        gha_append_step_summary,
-        gha_load_github_event,
-        gha_set_output,
-    )
-
-    return _GithubActionsApi(
-        append_step_summary=gha_append_step_summary,
-        load_github_event=gha_load_github_event,
-        set_output=gha_set_output,
-    )
 
 
 # Keep in sync with the `report_formats` input in
@@ -93,7 +61,6 @@ _SUPPORTED_FORMATS: dict[str, str] = {
 _GITLEAKS_VERSION = "8.30.1"
 _GITLEAKS_TARBALL_FILENAME = f"gitleaks_{_GITLEAKS_VERSION}_linux_x64.tar.gz"
 _GITLEAKS_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_GITLEAKS_TARBALL_FILENAME}"
-_GITLEAKS_MAX_TARBALL_BYTES = 100 * 1024 * 1024  # 100 MiB guardrail
 _CONFIG_PATH = "gitleaks.toml"
 # Pin --exit-code to 1 so we can tell clean (0) from leaks (1) from a
 # gitleaks error (>1).
@@ -138,12 +105,6 @@ class _ReportTarget:
     path: Path
 
 
-def _sha256_of(path: Path) -> str:
-    """Return the SHA-256 of `path` as a lowercase hex string."""
-    with open(path, "rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
-
-
 def get_gitleaks_binary() -> Path:
     """Return a verified gitleaks binary in RUNNER_TEMP/gitleaks-<ver>.
 
@@ -157,51 +118,17 @@ def get_gitleaks_binary() -> Path:
         return binary
 
     expected_sha = expected_sha256(REPO_ROOT, _GITLEAKS_TARBALL_FILENAME)
-
-    install_dir.mkdir(parents=True, exist_ok=True)
     log.info(
         "Downloading gitleaks v%s from %s",
         _GITLEAKS_VERSION,
         _GITLEAKS_TARBALL_URL,
     )
-    with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
-        tarball_path = Path(tmp.name)
-    try:
-        with (
-            urlopen(Request(_GITLEAKS_TARBALL_URL), timeout=60) as resp,
-            open(tarball_path, "wb") as out,
-        ):
-            written = 0
-            chunk = resp.read(1024 * 1024)
-            while chunk:
-                if written + len(chunk) > _GITLEAKS_MAX_TARBALL_BYTES:
-                    raise RuntimeError(
-                        f"gitleaks tarball exceeds {_GITLEAKS_MAX_TARBALL_BYTES} bytes "
-                        f"(source: {_GITLEAKS_TARBALL_URL})"
-                    )
-                out.write(chunk)
-                written += len(chunk)
-                chunk = resp.read(1024 * 1024)
-        actual_sha = _sha256_of(tarball_path)
-        if actual_sha != expected_sha:
-            raise RuntimeError(
-                f"gitleaks tarball SHA256 mismatch: expected {expected_sha} "
-                f"(from {CHECKSUMS_FILENAME}), got {actual_sha} "
-                f"(downloaded from {_GITLEAKS_TARBALL_URL}). Refusing to "
-                "use this binary."
-            )
-        with tarfile.open(tarball_path, mode="r:gz") as tar:
-            # filter="data" rejects unsafe members (traversal, abs paths, devices).
-            member = tar.getmember("gitleaks")
-            tar.extract(member, path=install_dir, filter="data")
-    finally:
-        tarball_path.unlink(missing_ok=True)
-
-    if not binary.is_file():
-        raise RuntimeError(
-            f"gitleaks tarball for v{_GITLEAKS_VERSION} did not contain "
-            f"a 'gitleaks' file at {binary}"
-        )
+    binary = download_and_verify_tarball(
+        url=_GITLEAKS_TARBALL_URL,
+        expected_sha256=expected_sha,
+        member_name="gitleaks",
+        install_dir=install_dir,
+    )
     binary.chmod(0o755)
 
     try:
@@ -581,11 +508,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
-    try:
-        gha = _import_github_actions_api()
-    except RuntimeError as exc:
-        log.error("%s", exc)
-        return 2
+    gha_api = import_github_actions_api()
+    gha = _GithubActionsApi(
+        append_step_summary=gha_api.append_step_summary,
+        load_github_event=gha_api.load_github_event,
+        set_output=gha_api.set_output,
+    )
     args = build_parser().parse_args(argv)
 
     try:

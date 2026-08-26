@@ -37,7 +37,8 @@ different things:
 release tarball from a pinned S3 mirror and verifies it against
 `checksums.sha256` (a repo-root file shared across all scanners that
 download a binary, e.g. gitleaks, trivy) before extracting or executing
-anything, via the shared `binary_checksums.py` helper. A digest mismatch
+anything, via the shared `security_scanners/utils/binary_checksums.py`
+helper. A digest mismatch
 (or a missing/malformed checksums file) makes the scan job fail closed
 rather than run an unverified binary.
 
