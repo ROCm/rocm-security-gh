@@ -66,24 +66,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      # This job checks out *two* repos: this workflow's own repo (tooling:
-      # bandit.py, bandit.yaml) at $GITHUB_WORKSPACE root, and the scan
-      # target (the calling repo) into a side directory below. They can't
-      # share the workspace root: actions/checkout wipes the *entire*
-      # workspace the first time it checks out a path with no pre-existing
-      # `.git` there (regardless of `clean:`), so whichever repo lands at
-      # root has to be checked out exactly once and first.
-      #
-      # Tooling goes at root (not the scan target) because `uses: ./path`
-      # local action/workflow references -- used elsewhere in this repo's
-      # workflows -- resolve relative to $GITHUB_WORKSPACE on disk, not to
-      # this repo automatically.
       - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # job.workflow_repository / job.workflow_sha identify the repo
-          # and exact commit that *this* reusable workflow file was called
-          # at/from, regardless of which repo called it.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
