@@ -18,10 +18,6 @@ Exit codes:
 
 Inputs come from CLI flags or matching `BANDIT_*` env vars set by the
 workflow.
-
-`gha_*` helpers (`gha_load_github_event`, `gha_set_output`,
-`gha_append_step_summary`) live in ROCm/TheRock's `github_actions_api`
-module rather than being duplicated here; see `_import_github_actions_api`.
 """
 
 import argparse
@@ -38,7 +34,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
-from binary_checksums import download_and_verify_file, expected_sha256
+from security_scanners.utils.binary_checksums import (
+    download_and_verify_file,
+    expected_sha256,
+)
+from security_scanners.utils.github_actions_api import import_github_actions_api
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -46,34 +46,11 @@ log = logging.getLogger(__name__)
 
 
 class _GithubActionsApi(NamedTuple):
-    """The subset of ROCm/TheRock's `github_actions_api` module this script uses."""
+    """The subset of workflow-command helpers this script uses."""
 
     append_step_summary: Callable[[str], None]
     load_github_event: Callable[[], Mapping[str, object]]
     set_output: Callable[[Mapping[str, str]], None]
-
-
-def _import_github_actions_api() -> _GithubActionsApi:
-    """Import `gha_*` helpers from ROCm/TheRock's `github_actions_api` module."""
-    therock_build_tools = os.environ.get("THEROCK_BUILD_TOOLS_DIR")
-    if not therock_build_tools:
-        raise RuntimeError(
-            "THEROCK_BUILD_TOOLS_DIR is not set; expected the workflow to "
-            "check out ROCm/TheRock and point this at its build_tools/ dir."
-        )
-    if therock_build_tools not in sys.path:
-        sys.path.insert(0, therock_build_tools)
-    from github_actions.github_actions_api import (
-        gha_append_step_summary,
-        gha_load_github_event,
-        gha_set_output,
-    )
-
-    return _GithubActionsApi(
-        append_step_summary=gha_append_step_summary,
-        load_github_event=gha_load_github_event,
-        set_output=gha_set_output,
-    )
 
 
 # Keep in sync with the `report_formats` input in
@@ -164,7 +141,8 @@ def get_bandit_binary() -> Path:
     resolve and fetch the bandit sdist itself straight from PyPI on
     pip's own (unaudited-by-us) TLS chain, this downloads that exact
     source tarball from a pinned S3 mirror, verifies it against this
-    repo's `checksums.sha256` (see `binary_checksums.py`), and only then
+    repo's `checksums.sha256` (see `security_scanners/utils/binary_checksums.py`),
+    and only then
     hands the verified local file to pip, which builds and installs it
     (bandit has no compiled extensions, so a pure-Python sdist build is
     a normal, fast `pip install`). pip still resolves bandit's
@@ -613,11 +591,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
-    try:
-        gha = _import_github_actions_api()
-    except RuntimeError as exc:
-        log.error("%s", exc)
-        return 2
+    gha_api = import_github_actions_api()
+    gha = _GithubActionsApi(
+        append_step_summary=gha_api.append_step_summary,
+        load_github_event=gha_api.load_github_event,
+        set_output=gha_api.set_output,
+    )
     args = build_parser().parse_args(argv)
 
     try:

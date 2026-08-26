@@ -52,7 +52,7 @@ different things:
          report_formats: txt
    ```
 
-2. Add a scheduled job that uploads to the Security tab (sibling
+1. Add a scheduled job that uploads to the Security tab (sibling
    scanners can live in the same workflow -- see `weekly_security.yml`
    below). Grant `security-events: write` on the `uses:` job itself --
    the top-level `permissions:` block above it is not enough, since a

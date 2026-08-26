@@ -20,54 +20,12 @@ from bandit import (
     _diff_range,
     _enrich_sarif_with_security_severity,
     _GithubActionsApi,
-    _import_github_actions_api,
     _parse_report_formats,
     _resolve_config_path,
     _tally_findings_by_severity,
     get_bandit_binary,
     main,
 )
-
-
-class ImportGithubActionsApiTest(unittest.TestCase):
-    """Tests for `_import_github_actions_api`."""
-
-    def setUp(self):
-        patcher = mock.patch.dict(os.environ, {}, clear=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        os.environ.pop("THEROCK_BUILD_TOOLS_DIR", None)
-
-    def test_raises_when_env_var_unset(self):
-        with self.assertRaises(RuntimeError) as ctx:
-            _import_github_actions_api()
-        self.assertIn("THEROCK_BUILD_TOOLS_DIR", str(ctx.exception))
-
-    def test_imports_from_env_var_path(self):
-        # Isolate this test's sys.path/sys.modules mutations: importing a
-        # real `github_actions.github_actions_api` module (even a stub)
-        # caches it in sys.modules, which must not leak into other tests.
-        self.addCleanup(sys.modules.pop, "github_actions.github_actions_api", None)
-        self.addCleanup(sys.modules.pop, "github_actions", None)
-        with tempfile.TemporaryDirectory() as tmp:
-            build_tools = Path(tmp) / "build_tools"
-            (build_tools / "github_actions").mkdir(parents=True)
-            (build_tools / "github_actions" / "github_actions_api.py").write_text(
-                "def gha_append_step_summary(summary):\n"
-                "    return 'summary:' + summary\n"
-                "def gha_load_github_event():\n"
-                "    return {'stub': True}\n"
-                "def gha_set_output(vars):\n"
-                "    return dict(vars)\n",
-                encoding="utf-8",
-            )
-            os.environ["THEROCK_BUILD_TOOLS_DIR"] = str(build_tools)
-            self.addCleanup(sys.path.remove, str(build_tools))
-            gha = _import_github_actions_api()
-
-        self.assertEqual(gha.append_step_summary("x"), "summary:x")
-        self.assertEqual(gha.load_github_event(), {"stub": True})
-        self.assertEqual(gha.set_output({"a": "b"}), {"a": "b"})
 
 
 class MainTest(unittest.TestCase):
@@ -80,16 +38,6 @@ class MainTest(unittest.TestCase):
             set_output=set_output or (lambda outputs: None),
         )
 
-    def test_import_failure_returns_2_without_raising(self):
-        # _import_github_actions_api() runs before argument parsing; a
-        # missing THEROCK_BUILD_TOOLS_DIR must map to exit code 2, not an
-        # unhandled traceback.
-        with mock.patch(
-            "bandit._import_github_actions_api",
-            side_effect=RuntimeError("THEROCK_BUILD_TOOLS_DIR is not set"),
-        ):
-            self.assertEqual(main([]), 2)
-
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
         # get_bandit_binary()/_run_bandit() can fail with exception types
         # other than RuntimeError (e.g. OSError from a pip/network
@@ -98,7 +46,7 @@ class MainTest(unittest.TestCase):
         # unhandled exception.
         with (
             mock.patch(
-                "bandit._import_github_actions_api",
+                "bandit.import_github_actions_api",
                 return_value=self._stub_gha(),
             ),
             mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
@@ -115,7 +63,7 @@ class MainTest(unittest.TestCase):
         set_output = mock.Mock()
         with (
             mock.patch(
-                "bandit._import_github_actions_api",
+                "bandit.import_github_actions_api",
                 return_value=self._stub_gha(set_output=set_output),
             ),
             mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
@@ -149,7 +97,7 @@ class MainTest(unittest.TestCase):
             try:
                 with (
                     mock.patch(
-                        "bandit._import_github_actions_api",
+                        "bandit.import_github_actions_api",
                         return_value=self._stub_gha(set_output=set_output),
                     ),
                     mock.patch(
