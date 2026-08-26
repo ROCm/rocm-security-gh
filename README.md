@@ -59,7 +59,7 @@ rather than run an unverified binary.
          report_formats: csv
    ```
 
-2. Add a scheduled job that uploads to the Security tab (sibling
+1. Add a scheduled job that uploads to the Security tab (sibling
    scanners, e.g. `zizmor`, can live in the same workflow -- see
    `weekly-security-scan.yml` below). Grant `security-events: write` on the
    `uses:` job itself -- the top-level `permissions:` block above it is
