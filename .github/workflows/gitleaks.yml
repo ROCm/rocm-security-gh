@@ -40,16 +40,6 @@ on:
         required: false
         type: string
         default: "."
-# Deliberately no top-level `permissions:` block. A caller's permissions
-# are an upper bound that a reusable workflow can only preserve or
-# reduce, never elevate -- so a `permissions: contents: read` block here
-# would silently zero out any `security-events: write` a caller grants
-# for SARIF uploads, breaking uploads with no obvious error (see
-# https://github.com/ROCm/rocm-tests/pull/70). Permissions are
-# intentionally left for each caller to define: PR-time callers that
-# only request CSV/JSON/JUnit need just `contents: read`; callers that
-# request `report_formats: sarif` must additionally grant
-# `security-events: write` on their own `uses:` job.
 
 jobs:
   scan:
@@ -57,25 +47,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      # This job checks out *two* repos: this workflow's own repo (tooling:
-      # gitleaks.py, gitleaks.toml) at $GITHUB_WORKSPACE root, and the scan
-      # target (the calling repo) into a side directory below. They can't
-      # share the workspace root: actions/checkout wipes the *entire*
-      # workspace the first time it checks out a path with no pre-existing
-      # `.git` there (regardless of `clean:`), so whichever repo lands at
-      # root has to be checked out exactly once and first.
-      #
-      # Tooling goes at root (not the scan target) because `uses: ./path`
-      # local action/workflow references -- used elsewhere in this repo's
-      # workflows -- resolve relative to $GITHUB_WORKSPACE on disk, not to
-      # this repo automatically.
       - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # job.workflow_repository / job.workflow_sha identify the repo
-          # and exact commit that *this* reusable workflow file was called
-          # at/from, regardless of which repo called it. Valid job-context
-          # properties; actionlint ignore is in .github/actionlint.yaml.
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
@@ -102,7 +76,7 @@ jobs:
           GITLEAKS_SCAN_MODE: ${{ inputs.scan_mode }}
           GITLEAKS_REPORT_FORMATS: ${{ inputs.report_formats }}
           GITLEAKS_SOURCE_DIR: .scan-target/${{ inputs.scan_path }}
-        run: python security_scanners/github_actions/gitleaks.py
+        run: python -m security_scanners.github_actions.gitleaks
 
       - name: Upload SARIF report to code scanning
         if: always() && steps.scan.outputs.sarif_path != ''
