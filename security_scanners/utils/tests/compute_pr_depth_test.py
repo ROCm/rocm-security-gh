@@ -59,18 +59,12 @@ class ComputeFetchDepthTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    """Tests for compute_pr_depth.main's TheRock dependency handling."""
+    """Tests for compute_pr_depth.main."""
 
-    def setUp(self):
-        patcher = mock.patch.dict(os.environ, {}, clear=False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        os.environ.pop("THEROCK_BUILD_TOOLS_DIR", None)
-
-    def test_raises_when_therock_build_tools_dir_unset(self):
-        with self.assertRaises(RuntimeError) as ctx:
-            main([])
-        self.assertIn("THEROCK_BUILD_TOOLS_DIR", str(ctx.exception))
+    def test_raises_when_github_event_path_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(KeyError):
+                main([])
 
 
 if __name__ == "__main__":

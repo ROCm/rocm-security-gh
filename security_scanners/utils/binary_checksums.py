@@ -26,22 +26,16 @@ _DEFAULT_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024  # 100 MiB guardrail
 _DEFAULT_TIMEOUT_SECONDS = 60
 
 
-def sha256_of(path: Path) -> str:
-    """Return the SHA-256 of `path` as a lowercase hex string."""
-    with open(path, "rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
+def _parse_checksum_entries(checksums_path: Path) -> dict[str, str]:
+    """Parse and validate every entry in ``checksums_path``.
 
-
-def expected_sha256(repo_root: Path, filename: str) -> str:
-    """Return the pinned SHA-256 digest for `filename` from `repo_root/checksums.sha256`.
-
-    Fails closed (raises) rather than falling back to any default: a
-    missing file, a malformed line, or no entry for `filename` must all
-    block use of the artifact, not silently skip verification.
+    Raises on structural errors, malformed digests, or duplicate filenames
+    with conflicting digests.
     """
-    checksums_path = repo_root / CHECKSUMS_FILENAME
     if not checksums_path.is_file():
         raise FileNotFoundError(f"checksums file not found at '{checksums_path}'")
+
+    entries: dict[str, str] = {}
     for lineno, raw_line in enumerate(
         checksums_path.read_text(encoding="utf-8").splitlines(), start=1
     ):
@@ -56,15 +50,42 @@ def expected_sha256(repo_root: Path, filename: str) -> str:
             )
         digest, entry_name = parts
         entry_name = entry_name.lstrip("*")  # sha256sum binary-mode marker
-        if entry_name != filename:
-            continue
         if not _SHA256_HEX_RE.fullmatch(digest):
             raise ValueError(
                 f"{checksums_path}:{lineno}: '{digest}' is not a valid "
                 "64-character lowercase hex SHA-256 digest"
             )
-        return digest
-    raise ValueError(f"No checksum entry for '{filename}' in {checksums_path}")
+        previous = entries.get(entry_name)
+        if previous is not None and previous != digest:
+            raise ValueError(
+                f"{checksums_path}:{lineno}: conflicting checksum entries for "
+                f"'{entry_name}' ({previous} vs {digest})"
+            )
+        entries[entry_name] = digest
+    return entries
+
+
+def sha256_of(path: Path) -> str:
+    """Return the SHA-256 of `path` as a lowercase hex string."""
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def expected_sha256(repo_root: Path, filename: str) -> str:
+    """Return the pinned SHA-256 digest for `filename` from `repo_root/checksums.sha256`.
+
+    Fails closed (raises) rather than falling back to any default: a
+    missing file, a malformed line, or no entry for `filename` must all
+    block use of the artifact, not silently skip verification.
+    """
+    checksums_path = repo_root / CHECKSUMS_FILENAME
+    entries = _parse_checksum_entries(checksums_path)
+    try:
+        return entries[filename]
+    except KeyError as exc:
+        raise ValueError(
+            f"No checksum entry for '{filename}' in {checksums_path}"
+        ) from exc
 
 
 def _download_to_file(
@@ -141,8 +162,9 @@ def download_and_verify_tarball(
     """Download `url`, verify its SHA-256, then extract `member_name` into `install_dir`.
 
     The digest is checked before anything is extracted, so a mismatch
-    (or an oversized download) never reaches ``tarfile``. Extraction uses
-    the ``"data"`` filter, which rejects absolute paths, ``..`` traversal,
+    (or an oversized download) never reaches ``tarfile``. Compression is
+    autodetected (``.tar.gz``, ``.tar.xz``, etc.) via ``mode="r:*"``.
+    Extraction uses the ``"data"`` filter, which rejects absolute paths, ``..`` traversal,
     device files, and most symlink tricks. Returns the path to the
     extracted member; raises ``RuntimeError`` if the digest doesn't match,
     the download exceeds ``max_bytes``, or the tarball doesn't contain
@@ -162,7 +184,7 @@ def download_and_verify_tarball(
                 f"{CHECKSUMS_FILENAME}), got {actual_sha256} (downloaded "
                 f"from {url}). Refusing to use this artifact."
             )
-        with tarfile.open(tarball_path, mode="r:gz") as tar:
+        with tarfile.open(tarball_path, mode="r:*") as tar:
             member = tar.getmember(member_name)
             tar.extract(member, path=install_dir, filter="data")
     finally:

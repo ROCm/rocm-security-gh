@@ -33,7 +33,7 @@ live in `security_scanners/utils/` with unit tests alongside them
 (`*_test.py`, run via `pytest`). Before opening a PR:
 
 ```bash
-cd security_scanners
-pip install -r requirements-test.txt
-pytest
+# from repo root
+pip install -r security_scanners/requirements-test.txt
+python -m pytest security_scanners
 ```
