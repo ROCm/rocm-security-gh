@@ -1,6 +1,10 @@
 [tool.pytest.ini_options]
 testpaths = [
+<<<<<<< HEAD
     "github_actions/tests",
+=======
+    "utils/tests",
+>>>>>>> 0bc6339e (add common files and shared snippets (#7))
 ]
 python_files = ["*_test.py"]
 addopts = "-ra"
