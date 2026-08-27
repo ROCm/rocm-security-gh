@@ -26,26 +26,22 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple, TypedDict, cast
+from typing import TypedDict, cast
 
 from security_scanners.utils.binary_checksums import (
     CHECKSUMS_FILENAME,
     download_and_verify_tarball,
     expected_sha256,
 )
-from security_scanners.utils.github_actions_api import import_github_actions_api
+from security_scanners.utils.github_actions_api import (
+    gha_append_step_summary,
+    gha_load_github_event,
+    gha_set_output,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 log = logging.getLogger(__name__)
-
-
-class _GithubActionsApi(NamedTuple):
-    """The subset of workflow-command helpers this script uses."""
-
-    append_step_summary: Callable[[str], None]
-    load_github_event: Callable[[], Mapping[str, object]]
-    set_output: Callable[[Mapping[str, str]], None]
 
 
 # Keep in sync with the `report_formats` input in
@@ -68,6 +64,9 @@ _CONFIG_PATH = "gitleaks.toml"
 # gitleaks error (>1).
 _LEAK_EXIT_CODE = 1
 _LEAK_SECURITY_SEVERITY_HIGH = "8.5"
+# GitHub renders at most 1 MiB of job summary per step and drops anything
+# beyond it, so leave headroom for the headings and fences we wrap reports in.
+_STEP_SUMMARY_BUDGET_BYTES = 900 * 1024
 
 # Null SHA-1 git uses for "no previous commit" (a newly created ref).
 Z40 = "0" * 40
@@ -446,12 +445,33 @@ def _md_code_fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _clip_to_budget(content: str, budget_bytes: int) -> tuple[str, bool]:
+    """Return `content` clipped to `budget_bytes`, and whether it was clipped.
+
+    Clips on a line boundary so a report never ends mid-record.
+    """
+    encoded = content.encode("utf-8")
+    if len(encoded) <= budget_bytes:
+        return content, False
+    if budget_bytes <= 0:
+        return "", True
+    clipped = encoded[:budget_bytes].decode("utf-8", errors="ignore")
+    last_newline = clipped.rfind("\n")
+    return (clipped[: last_newline + 1] if last_newline != -1 else clipped), True
+
+
 def _emit_non_sarif_reports(
     non_sarif: list[_ReportTarget],
-    gha_append_step_summary: Callable[[str], None],
+    append_step_summary: Callable[[str], None],
 ) -> None:
-    """Surface each non-SARIF report in the workflow run."""
+    """Surface each non-SARIF report in the workflow run.
+
+    Every report reaches the job log in full and is uploaded as an artifact by
+    the workflow; only the job summary is budgeted, since GitHub discards
+    summaries that run past its size limit.
+    """
     summary_chunks: list[str] = []
+    remaining = _STEP_SUMMARY_BUDGET_BYTES
     for target in non_sarif:
         path = target.path
         if not path.is_file():
@@ -464,12 +484,25 @@ def _emit_non_sarif_reports(
         print(f"::group::Gitleaks report: {path}")
         print(content)
         print("::endgroup::")
-        fence = _md_code_fence(content)
-        summary_chunks.append(
-            f"### Gitleaks report: `{path}`\n\n{fence}\n{content}\n{fence}"
-        )
+
+        shown, clipped = _clip_to_budget(content, remaining)
+        remaining -= len(shown.encode("utf-8"))
+        chunk = f"### Gitleaks report: `{path}`"
+        if shown:
+            fence = _md_code_fence(shown)
+            chunk += f"\n\n{fence}\n{shown}\n{fence}"
+        if clipped:
+            log.warning(
+                "report '%s' exceeds the job-summary budget; summary truncated",
+                path,
+            )
+            chunk += (
+                "\n\n_Truncated to stay under GitHub's job-summary limit. "
+                "The full report is in the uploaded artifact._"
+            )
+        summary_chunks.append(chunk)
     if summary_chunks:
-        gha_append_step_summary("\n\n".join(summary_chunks))
+        append_step_summary("\n\n".join(summary_chunks))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -510,12 +543,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
-    gha_api = import_github_actions_api()
-    gha = _GithubActionsApi(
-        append_step_summary=gha_api.append_step_summary,
-        load_github_event=gha_api.load_github_event,
-        set_output=gha_api.set_output,
-    )
     args = build_parser().parse_args(argv)
 
     try:
@@ -535,7 +562,7 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha.load_github_event()
+        event = gha_load_github_event()
         log_opts = _determine_log_opts(
             scan_mode=args.scan_mode,
             event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
@@ -570,7 +597,7 @@ def main(argv: list[str]) -> int:
         # non-empty path set *before* gitleaks runs (or on a path that
         # never got written) would make the SARIF upload step fire
         # against a missing file and fail with a confusing second error.
-        gha.set_output(
+        gha_set_output(
             {
                 "sarif_path": (
                     str(sarif_target.path)
@@ -584,7 +611,7 @@ def main(argv: list[str]) -> int:
         )
     except RuntimeError as exc:
         log.error("%s", exc)
-        _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+        _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
         return 2
     except Exception:
         # get_gitleaks_binary() can also fail with e.g. KeyError (tarball
@@ -593,10 +620,10 @@ def main(argv: list[str]) -> int:
         # every scanner failure to exit code 2, so this is a deliberately
         # broad catch-all at main()'s top-level error boundary.
         log.exception("gitleaks install or scan failed unexpectedly")
-        _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+        _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
         return 2
 
-    _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+    _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
 
     if leaks_found:
         log.error("gitleaks found one or more potential secrets; see report artifacts")

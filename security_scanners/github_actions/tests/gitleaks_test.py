@@ -16,10 +16,12 @@ from gitleaks import (
     _CONFIG_PATH,
     _LEAK_SECURITY_SEVERITY_HIGH,
     _ReportTarget,
+    _STEP_SUMMARY_BUDGET_BYTES,
     _SUPPORTED_FORMATS,
+    _clip_to_budget,
     _determine_log_opts,
+    _emit_non_sarif_reports,
     _enrich_sarif_with_security_severity,
-    _GithubActionsApi,
     _md_code_fence,
     _parse_report_formats,
     _resolve_config_path,
@@ -32,13 +34,6 @@ from gitleaks import (
 class MainTest(unittest.TestCase):
     """Tests for main()'s documented exit-code contract."""
 
-    def _stub_gha(self) -> _GithubActionsApi:
-        return _GithubActionsApi(
-            append_step_summary=lambda summary: None,
-            load_github_event=lambda: {},
-            set_output=lambda outputs: None,
-        )
-
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
         # get_gitleaks_binary()/_run_gitleaks() can fail with exception
         # types other than RuntimeError (e.g. KeyError from a malformed
@@ -46,10 +41,9 @@ class MainTest(unittest.TestCase):
         # to exit code 2 per this module's documented contract, not
         # escape main() as an unhandled exception.
         with (
-            mock.patch(
-                "gitleaks.import_github_actions_api",
-                return_value=self._stub_gha(),
-            ),
+            mock.patch("gitleaks.gha_load_github_event", return_value={}),
+            mock.patch("gitleaks.gha_append_step_summary"),
+            mock.patch("gitleaks.gha_set_output"),
             mock.patch("gitleaks._resolve_config_path", return_value="gitleaks.toml"),
             mock.patch(
                 "gitleaks.get_gitleaks_binary", side_effect=KeyError("gitleaks")
@@ -58,19 +52,15 @@ class MainTest(unittest.TestCase):
             self.assertEqual(main(["--scan-mode", "all", "--source-dir", "."]), 2)
 
     def test_scan_failure_never_reports_a_nonexistent_sarif_path(self):
-        # `set_output` must not be called with a non-empty sarif_path
+        # `gha_set_output` must not be called with a non-empty sarif_path
         # before the report file actually exists: the workflow's upload
         # step runs whenever `sarif_path != ''`, so reporting the path
         # ahead of (or despite) a failed run would make that step fire
         # against a missing file and mask the real failure.
-        set_output = mock.Mock()
-        gha = _GithubActionsApi(
-            append_step_summary=lambda summary: None,
-            load_github_event=lambda: {},
-            set_output=set_output,
-        )
         with (
-            mock.patch("gitleaks.import_github_actions_api", return_value=gha),
+            mock.patch("gitleaks.gha_load_github_event", return_value={}),
+            mock.patch("gitleaks.gha_append_step_summary"),
+            mock.patch("gitleaks.gha_set_output") as set_output,
             mock.patch("gitleaks._resolve_config_path", return_value="gitleaks.toml"),
             mock.patch(
                 "gitleaks.get_gitleaks_binary",
@@ -323,6 +313,84 @@ class MdCodeFenceTest(unittest.TestCase):
         self.assertNotIn(fence, content)
         self.assertTrue(block.startswith(fence + "\n"))
         self.assertTrue(block.endswith("\n" + fence))
+
+
+class ClipToBudgetTest(unittest.TestCase):
+    """Tests for `_clip_to_budget`."""
+
+    def test_content_within_budget_is_untouched(self):
+        self.assertEqual(_clip_to_budget("a,b,c\n", 1024), ("a,b,c\n", False))
+
+    def test_oversized_content_is_clipped_on_a_line_boundary(self):
+        content = "".join(f"line{i}\n" for i in range(100))
+        shown, clipped = _clip_to_budget(content, 50)
+        self.assertTrue(clipped)
+        self.assertLessEqual(len(shown.encode("utf-8")), 50)
+        # Clipping mid-record would render a partial finding in the summary.
+        self.assertTrue(shown.endswith("\n"))
+        self.assertTrue(content.startswith(shown))
+
+    def test_exhausted_budget_yields_nothing(self):
+        self.assertEqual(_clip_to_budget("data\n", 0), ("", True))
+
+    def test_clip_never_splits_a_multibyte_character(self):
+        # Two bytes per character and no newline to fall back on, so the
+        # byte-level cut lands mid-character.
+        shown, clipped = _clip_to_budget("é" * 100, 5)
+        self.assertTrue(clipped)
+        self.assertEqual(shown, "éé")
+
+
+class EmitNonSarifReportsTest(unittest.TestCase):
+    """Tests for `_emit_non_sarif_reports`' job-summary budgeting."""
+
+    def _report(self, content: str) -> _ReportTarget:
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = Path(tmp) / "gitleaks-report.csv"
+        path.write_text(content, encoding="utf-8")
+        return _ReportTarget(fmt="csv", path=path)
+
+    def test_report_within_budget_is_emitted_in_full(self):
+        target = self._report("file,secret\na.txt,REDACTED\n")
+        appended: list[str] = []
+        _emit_non_sarif_reports([target], appended.append)
+        (summary,) = appended
+        self.assertIn("a.txt,REDACTED", summary)
+        self.assertNotIn("Truncated", summary)
+
+    def test_oversized_report_is_truncated_and_points_at_the_artifact(self):
+        target = self._report("".join(f"row{i},REDACTED\n" for i in range(200)))
+        appended: list[str] = []
+        with mock.patch("gitleaks._STEP_SUMMARY_BUDGET_BYTES", 64):
+            _emit_non_sarif_reports([target], appended.append)
+        (summary,) = appended
+        self.assertIn("row0,REDACTED", summary)
+        self.assertNotIn("row199,REDACTED", summary)
+        self.assertIn("Truncated", summary)
+        self.assertIn("artifact", summary)
+
+    def test_budget_is_shared_across_reports(self):
+        first = self._report("".join(f"row{i},REDACTED\n" for i in range(50)))
+        second = self._report("second,REDACTED\n")
+        appended: list[str] = []
+        with mock.patch("gitleaks._STEP_SUMMARY_BUDGET_BYTES", 64):
+            _emit_non_sarif_reports([first, second], appended.append)
+        (summary,) = appended
+        # The first report consumes the budget, so the second is announced
+        # but its contents are left to the artifact.
+        self.assertIn("row0,REDACTED", summary)
+        self.assertNotIn("second,REDACTED", summary)
+        self.assertIn(str(second.path), summary)
+
+    def test_default_budget_stays_under_githubs_limit(self):
+        self.assertLess(_STEP_SUMMARY_BUDGET_BYTES, 1024 * 1024)
+
+    def test_missing_report_is_skipped_without_a_summary(self):
+        target = _ReportTarget(fmt="csv", path=Path("does-not-exist.csv"))
+        appended: list[str] = []
+        _emit_non_sarif_reports([target], appended.append)
+        self.assertEqual(appended, [])
 
 
 class RedactionRegressionTest(unittest.TestCase):
