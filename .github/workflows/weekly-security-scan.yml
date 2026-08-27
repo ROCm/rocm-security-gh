@@ -4,9 +4,7 @@
 # Weekly security scan: runs on a fixed cadence and pushes SARIF findings
 # to the repository's code-scanning Security tab. Complements the PR-side
 # jobs in `pr-security-scan.yml`, which scan only what changed in a PR
-# and upload plain-text/CSV artifacts for in-review browsing. Sibling
-# scanners can be added as additional jobs in this file as they come
-# online, keeping all scheduled security scans discoverable in one place.
+# and upload plain-text/CSV artifacts for in-review browsing.
 
 name: Weekly security scan
 
@@ -20,26 +18,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  zizmor:
-    # `zizmor.yml` declares no `permissions:` of its own, so this job's
-    # grant flows straight through to its steps: `contents: read` for the
-    # checkout steps, `security-events: write` for the SARIF upload.
+  # `security-scan.yml` declares no `permissions:` of its own, so this
+  # job's grant flows straight through to every scanner job it fans out
+  # to: `contents: read` for the checkout steps, `security-events: write`
+  # for the SARIF uploads. New scanners are picked up here automatically.
+  security:
     permissions:
       contents: read
       security-events: write
-    uses: ./.github/workflows/zizmor.yml
-    with:
-      scan_mode: all
-      report_formats: sarif
-
-  gitleaks:
-    # `gitleaks.yml` declares no `permissions:` of its own, so this job's
-    # grant flows straight through to its steps: `contents: read` for the
-    # checkout steps, `security-events: write` for the SARIF upload.
-    permissions:
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/gitleaks.yml
+    uses: ./.github/workflows/security-scan.yml
     with:
       scan_mode: all
       report_formats: sarif

@@ -22,13 +22,30 @@ than run an unverified binary.
 
 ## Scanners
 
-Each scanner is a `workflow_call` reusable workflow that any ROCm
-repository can call to scan itself. They all take the same three inputs --
-`scan_mode` (`changed` by default, or `all`), `report_formats`, and
-`scan_path` (`.` by default) -- so they are wired up identically; see
-[Consuming these workflows from another repo](#consuming-these-workflows-from-another-repo)
-below. The input descriptions in each workflow file are the authoritative
-reference.
+`.github/workflows/security-scan.yml` is the single `workflow_call`
+entry point every ROCm repository calls. One job in the caller fans out
+to one isolated job per scanner, which means:
+
+- **Adding a scanner is a change here only.** Callers that leave
+  `scanners` at its default pick up new scanners on their next run,
+  with no pull request against their repository.
+- **Scanners stay isolated.** Each one gets its own runner, its own
+  workspace and its own check run, so no scanner can see another's
+  leftover report files, and an individual scanner can be made a
+  required status check in branch protection.
+- **Callers don't learn per-scanner vocabulary.** The inputs are
+  tool-independent and each scanner maps them onto its own flags. Ask
+  for `report_formats: human` and every scanner produces whatever its
+  reviewer-readable format happens to be called.
+
+Inputs, all optional: `scanners`, `scan_mode`, `report_formats`,
+`scan_path`, `severity_threshold`, and `persona`. The input descriptions
+in the workflow file are the authoritative reference. Inputs that only
+some scanners understand are ignored by the rest, so
+`severity_threshold` has no effect on gitleaks and `persona` has none
+outside zizmor.
+
+The scanners below are what `scanners` accepts today.
 
 ### Zizmor
 
@@ -40,13 +57,14 @@ action references pinned to a mutable tag, credentials left on disk for
 later steps -- grading each finding by severity and confidence so a gate
 can fail on the serious ones while a reviewer triages the rest.
 
-- Workflow: `.github/workflows/zizmor.yml`
-- `report_formats`: `sarif` (default), `json`, `plain`, `github`
+- `scanners` name: `zizmor`
+- `report_formats`: `sarif` (default), `json`, `plain`, `github`, and
+  `human` (an alias for `plain`)
 - `scan_mode: changed` audits only the workflow / composite-action /
   dependabot files the calling event touched.
-- Also accepts `severity_threshold` (`high` by default) to set which
-  severity fails the job, and `persona` (`regular` by default) to widen
-  or narrow what zizmor reports.
+- Honors `severity_threshold` (`high` by default) to set which severity
+  fails the job, and `persona` (`regular` by default) to widen or narrow
+  what zizmor reports.
 
 ### Gitleaks
 
@@ -57,10 +75,12 @@ built-in detection rules plus any repo-specific rules in `gitleaks.toml`,
 so a secret is caught even after it has been removed from the working
 tree.
 
-- Workflow: `.github/workflows/gitleaks.yml`
-- `report_formats`: `sarif` (default), `json`, `csv`, `junit`
+- `scanners` name: `gitleaks`
+- `report_formats`: `sarif` (default), `json`, `csv`, `junit`, and
+  `human` (an alias for `csv`)
 - `scan_mode: changed` scans only the commits the calling event
   introduced, and requires a `pull_request` or `push` payload.
+- Ignores `severity_threshold`: every leak is a finding.
 
 ## Consuming these workflows from another repo
 
@@ -69,11 +89,11 @@ tree.
 PRs (including fork PRs) and trusted/scheduled runs should request
 different things:
 
-- **PR-time scans** should request a human-readable format (`plain` for
-  zizmor, `csv` for gitleaks) and grant only `contents: read`. Findings
-  are uploaded as a build artifact and printed to the job summary for a
-  human to review; nothing touches the Security tab, so fork PRs (which
-  never receive elevated tokens) work identically to same-repo PRs.
+- **PR-time scans** should request `report_formats: human` and grant only
+  `contents: read`. Findings are uploaded as a build artifact and printed
+  to the job summary for a human to review; nothing touches the Security
+  tab, so fork PRs (which never receive elevated tokens) work identically
+  to same-repo PRs.
 - **Trusted scans** (`schedule`, `workflow_dispatch`, `push` to the default
   branch) should request `report_formats: sarif` and grant both
   `contents: read` and `security-events: write` so findings land in
@@ -81,7 +101,10 @@ different things:
 
 ### Wiring it up
 
-1. Add a PR-time workflow with one job per scanner you want:
+These two workflows are the whole integration, and they are the same in
+every repository -- no per-scanner jobs to add or maintain.
+
+1. Add a PR-time workflow:
 
    ```yaml
    name: Security scan (PR)
@@ -90,18 +113,14 @@ different things:
    permissions:
      contents: read
    jobs:
-     zizmor:
-       uses: ROCm/rocm-security-gh/.github/workflows/zizmor.yml@main
+     security:
+       uses: ROCm/rocm-security-gh/.github/workflows/security-scan.yml@main
        with:
-         report_formats: plain
-     gitleaks:
-       uses: ROCm/rocm-security-gh/.github/workflows/gitleaks.yml@main
-       with:
-         report_formats: csv
+         report_formats: human
    ```
 
 1. Add a scheduled workflow that uploads to the Security tab. Grant
-   `security-events: write` on each `uses:` job itself -- the top-level
+   `security-events: write` on the `uses:` job itself -- the top-level
    `permissions:` block above it is not enough, since a `permissions:`
    block (wherever it's declared) implicitly zeroes out anything it
    doesn't list:
@@ -113,23 +132,20 @@ different things:
        - cron: "0 10 * * 6"
      workflow_dispatch:
    jobs:
-     zizmor:
+     security:
        permissions:
          contents: read
          security-events: write
-       uses: ROCm/rocm-security-gh/.github/workflows/zizmor.yml@main
-       with:
-         scan_mode: all
-         report_formats: sarif
-     gitleaks:
-       permissions:
-         contents: read
-         security-events: write
-       uses: ROCm/rocm-security-gh/.github/workflows/gitleaks.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-scan.yml@main
        with:
          scan_mode: all
          report_formats: sarif
    ```
+
+To opt out of a scanner, name the ones you want (`scanners: gitleaks`) --
+but note that pinning the list also opts out of scanners added later. An
+unrecognised name fails the workflow rather than being skipped, so a typo
+can't silently drop a scanner from the run.
 
 Pin `@main` to a tag or commit SHA once these workflows have a release; see
 `.github/workflows/weekly-security-scan.yml` and

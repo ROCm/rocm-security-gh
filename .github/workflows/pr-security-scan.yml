@@ -16,20 +16,13 @@ permissions:
   contents: read
 
 jobs:
-  # Audit workflow/action/dependabot files changed by this PR
-  # (`scan_mode: changed`, the reusable workflow's default). Plain-text
-  # report is uploaded as a build artifact and printed to the job
-  # summary so reviewers can browse findings directly from the PR's
-  # Checks tab.
-  zizmor:
-    uses: ./.github/workflows/zizmor.yml
+  # Every scanner, restricted to what this PR touched (`scan_mode:
+  # changed`, the default). Each one asks for its own reviewer-readable
+  # format via `human`, uploaded as a build artifact and printed to the
+  # job summary so reviewers can browse findings from the PR's Checks
+  # tab. Nothing reaches the Security tab, so fork PRs behave
+  # identically to same-repo PRs.
+  security:
+    uses: ./.github/workflows/security-scan.yml
     with:
-      report_formats: plain
-  # Scan commits introduced by this PR (`scan_mode: changed`, the
-  # reusable workflow's default). CSV report is uploaded as a build
-  # artifact and printed to the job summary so reviewers can browse
-  # findings directly from the PR's Checks tab.
-  gitleaks:
-    uses: ./.github/workflows/gitleaks.yml
-    with:
-      report_formats: csv
+      report_formats: human

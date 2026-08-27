@@ -101,6 +101,20 @@ class ParseReportFormatsTest(unittest.TestCase):
             ],
         )
 
+    def test_human_alias_resolves_to_plain(self):
+        targets = _parse_report_formats("human")
+        self.assertEqual([t.fmt for t in targets], ["plain"])
+        self.assertEqual(targets[0].path, Path("zizmor-report.txt"))
+
+    def test_human_alias_dedups_against_its_native_name(self):
+        targets = _parse_report_formats("human,plain")
+        self.assertEqual([t.fmt for t in targets], ["plain"])
+
+    def test_unknown_format_error_advertises_the_alias(self):
+        with self.assertRaises(ValueError) as ctx:
+            _parse_report_formats("nope")
+        self.assertIn("human", str(ctx.exception))
+
     def test_empty_input_raises(self):
         with self.assertRaises(ValueError) as ctx:
             _parse_report_formats("")

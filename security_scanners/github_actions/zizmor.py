@@ -61,6 +61,10 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "plain": "txt",
     "github": "txt",
 }
+# Tool-independent aliases, so a caller can ask every scanner for "the
+# report a reviewer reads" without knowing that gitleaks spells it 'csv',
+# zizmor 'plain' and trivy 'table'.
+_FORMAT_ALIASES: dict[str, str] = {"human": "plain"}
 _ZIZMOR_VERSION = "1.24.1"
 # Mirrored to the rocm-third-party-deps S3 bucket so CI doesn't depend on
 # github.com; the mirrored object's digest is pinned in `checksums.sha256`.
@@ -192,7 +196,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     targets: list[_ReportTarget] = []
     seen: set[str] = set()
     for raw_fmt in raw.split(","):
-        fmt = raw_fmt.strip()
+        fmt = _FORMAT_ALIASES.get(raw_fmt.strip(), raw_fmt.strip())
         if not fmt or fmt in seen:
             continue
         seen.add(fmt)
@@ -200,7 +204,8 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         if ext is None:
             raise ValueError(
                 f"Invalid report_formats entry '{fmt}' "
-                f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
+                f"(expected one of: "
+                f"{', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"zizmor-report.{ext}")))
     if not targets:
@@ -571,7 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--scan-mode",
-        default=os.environ.get("ZIZMOR_SCAN_MODE", "changed"),
+        default=os.environ.get("SCANNER_SCAN_MODE", "changed"),
         choices=("changed", "all"),
         help=(
             "'changed' (default) audits only workflow/action/dependabot "
@@ -583,15 +588,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--report-formats",
-        default=os.environ.get("ZIZMOR_REPORT_FORMATS", "sarif"),
+        default=os.environ.get("SCANNER_REPORT_FORMATS", "sarif"),
         help=(
-            "Comma-separated list of zizmor report formats. Allowed values: "
-            f"{', '.join(sorted(_SUPPORTED_FORMATS))}."
+            "Comma-separated list of zizmor report formats. Allowed "
+            f"values: {', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))}. "
+            f"'human' is an alias for '{_FORMAT_ALIASES['human']}', so a "
+            "caller can request a reviewer-readable report from every "
+            "scanner without knowing each tool's format names."
         ),
     )
     p.add_argument(
         "--source-dir",
-        default=os.environ.get("ZIZMOR_SOURCE_DIR", "."),
+        default=os.environ.get("SCANNER_SOURCE_DIR", "."),
         help=(
             "Path to audit (default %(default)s). Set to a subdirectory of "
             "the checkout to restrict the audit to that subtree; the "
@@ -602,7 +610,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--checkout-root",
-        default=os.environ.get("ZIZMOR_CHECKOUT_ROOT", "."),
+        default=os.environ.get("SCANNER_CHECKOUT_ROOT", "."),
         help=(
             "Git checkout root of the repository being scanned (default "
             "%(default)s). Used to run `git fetch`/`git diff` and to "
@@ -615,7 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--severity-threshold",
         default=os.environ.get(
-            "ZIZMOR_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD
+            "SCANNER_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD
         ),
         choices=_SEVERITY_CHOICES,
         help=(
@@ -631,7 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--persona",
-        default=os.environ.get("ZIZMOR_PERSONA", _DEFAULT_PERSONA),
+        default=os.environ.get("SCANNER_PERSONA", _DEFAULT_PERSONA),
         choices=_PERSONA_CHOICES,
         help=(
             "Zizmor audit persona. 'regular' (default) surfaces "

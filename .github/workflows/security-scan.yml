@@ -1,0 +1,189 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# The single entry point every ROCm repository calls. One job in the caller
+# fans out to one isolated job per scanner, so:
+#
+#   * adding a scanner is a change in this repository only -- callers pick
+#     it up on their next run with no pull request against their repo;
+#   * each scanner still gets its own runner, its own workspace and its own
+#     check run, so scanners cannot see each other's leftover files and a
+#     single scanner can be made a required status check;
+#   * callers never learn per-scanner vocabulary. The inputs below are
+#     tool-independent, and each scanner maps them onto its own flags.
+#
+# This workflow declares no `permissions:` of its own -- every permission
+# its steps use (`contents: read` to check out code, `security-events: write`
+# to upload SARIF) is whatever the calling job explicitly grants.
+name: Security scan
+
+on:
+  workflow_call:
+    inputs:
+      scanners:
+        description: >-
+          Comma-separated list of scanners to run, defaulting to all of
+          them. Each one runs in its own job. An unknown name fails the
+          workflow rather than being skipped, so a typo can't silently
+          drop a scanner from the run. Pass a subset only to opt out
+          deliberately (e.g. 'gitleaks' on a repo whose workflows are
+          audited elsewhere); leaving it at the default means new
+          scanners are picked up automatically.
+        required: false
+        type: string
+        default: gitleaks,zizmor
+      scan_mode:
+        description: >-
+          'changed' (default) restricts each scanner to what the calling
+          event touched -- commits for gitleaks, changed workflow files
+          for zizmor -- and requires a pull_request or push payload.
+          'all' scans everything in 'scan_path' and is required for
+          schedule, workflow_dispatch and release events.
+        required: false
+        type: string
+        default: changed
+      report_formats:
+        description: >-
+          Comma-separated list of report formats. 'sarif' (default) is
+          uploaded to GitHub code scanning; anything else is uploaded as a
+          build artifact and printed to the job summary. 'human' asks
+          each scanner for its own reviewer-readable format (csv for
+          gitleaks, plain for zizmor), so PR-time callers don't need to
+          know per-tool format names. Native names ('json', 'csv',
+          'plain', ...) still work but are only valid for the scanners
+          that support them.
+        required: false
+        type: string
+        default: sarif
+      scan_path:
+        description: >-
+          Path (relative to the repository root) to scan. Defaults to '.'
+          so the entire checkout is scanned; set to a subdirectory to
+          restrict the scan to that subtree. The path MUST exist after
+          checkout or the scan fails.
+        required: false
+        type: string
+        default: "."
+      severity_threshold:
+        description: >-
+          Minimum severity that fails a scanner, for the scanners that
+          grade findings by severity (zizmor; gitleaks treats every leak
+          as a finding and ignores this). Reports always keep every
+          finding regardless of threshold. Allowed values: 'low',
+          'medium', 'high' (default). Severity scales differ slightly
+          between tools, so a value one selected scanner doesn't know
+          fails that scanner's job loudly rather than being adjusted.
+        required: false
+        type: string
+        default: high
+      persona:
+        description: >-
+          Zizmor audit persona; ignored by other scanners. 'regular'
+          (default) surfaces high-signal, actionable findings.
+          'pedantic' adds code smells suitable for cleanup PRs.
+          'auditor' surfaces everything, including likely false
+          positives -- intended for security reviews, not CI.
+        required: false
+        type: string
+        default: regular
+
+jobs:
+  # Resolving the matrix in Python (rather than as a YAML expression) is
+  # what keeps `scanners` a plain comma-separated list, validates it
+  # against the known scanners before any scan job starts, and keeps each
+  # scanner's runner and timeout next to the scanner itself.
+  plan:
+    name: Plan scanners
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      # Set up before any step that runs a scanner script, so the version
+      # is pinned here rather than inherited from the runner image.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compute scanner matrix
+        id: matrix
+        env:
+          SCANNER_NAMES: ${{ inputs.scanners }}
+        run: python -m security_scanners.utils.compute_scan_matrix
+
+  scan:
+    # Named after the scanner alone so the check run reads
+    # '<caller job> / gitleaks' and stays stable as scanners are added.
+    name: ${{ matrix.scanner }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      # One scanner failing must not cancel the others: every scanner's
+      # findings should reach the Security tab on every run.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compute checkout fetch-depth
+        id: depth
+        run: python -m security_scanners.utils.compute_pr_depth
+
+      - name: Checkout scan target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ steps.depth.outputs.value }}
+          path: .scan-target
+          persist-credentials: false
+
+      # Every scanner reads the same `SCANNER_*` variables and ignores the
+      # ones it has no flag for, which is what lets one step body serve
+      # all of them. The module name goes through the environment rather
+      # than being interpolated into `run:`, so no caller-supplied value
+      # is ever expanded by the shell.
+      - name: Run ${{ matrix.scanner }}
+        id: scan
+        env:
+          SCANNER_MODULE: ${{ matrix.module }}
+          SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
+          SCANNER_REPORT_FORMATS: ${{ inputs.report_formats }}
+          SCANNER_SOURCE_DIR: .scan-target/${{ inputs.scan_path }}
+          SCANNER_CHECKOUT_ROOT: .scan-target
+          SCANNER_SEVERITY_THRESHOLD: ${{ inputs.severity_threshold }}
+          SCANNER_PERSONA: ${{ inputs.persona }}
+        run: python -m "${SCANNER_MODULE}"
+
+      - name: Upload SARIF report to code scanning
+        if: always() && steps.scan.outputs.sarif_path != ''
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif_path }}
+          category: ${{ matrix.scanner }}
+
+      - name: Upload non-SARIF reports
+        if: always() && steps.scan.outputs.non_sarif_paths != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.scanner }}-report
+          path: ${{ steps.scan.outputs.non_sarif_paths }}
+          if-no-files-found: ignore
