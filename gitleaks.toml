@@ -29,8 +29,11 @@ useDefault = true
 
 [[allowlists]]
 # Allowlist by location only where a real first-party secret structurally
-# can't live: vendored third-party trees and dependency lock files.
-description = "Vendored and generated paths"
+# can't live. Dependency lock files qualify: their contents are generated
+# from a manifest, and the high-entropy strings they carry are artifact
+# digests rather than credentials. Add vendored third-party trees here as
+# callers bring them in, one explicit path per entry.
+description = "Generated dependency lock files"
 paths = [
   '''.*\.lock$''',
 ]

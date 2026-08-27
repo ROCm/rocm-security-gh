@@ -56,8 +56,10 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "csv": "csv",
     "junit": "xml",
 }
-# Mirrored to the rocm-third-party-deps S3 bucket (see
-# docs/development/git_chores.md) so CI doesn't depend on github.com.
+# Mirrored to the rocm-third-party-deps S3 bucket so CI doesn't depend on
+# github.com. When bumping the version, add the new tarball's digest to
+# `checksums.sha256` (see that file's header for the required provenance
+# comment) and drop the entry for the version being replaced.
 _GITLEAKS_VERSION = "8.30.1"
 _GITLEAKS_TARBALL_FILENAME = f"gitleaks_{_GITLEAKS_VERSION}_linux_x64.tar.gz"
 _GITLEAKS_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_GITLEAKS_TARBALL_FILENAME}"
@@ -164,7 +166,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         ext = _SUPPORTED_FORMATS.get(fmt)
         if ext is None:
             raise ValueError(
-                f"Invalid report_format '{fmt}' "
+                f"Invalid report_formats entry '{fmt}' "
                 f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"gitleaks-report.{ext}")))
