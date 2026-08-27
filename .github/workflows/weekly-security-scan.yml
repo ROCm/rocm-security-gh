@@ -22,12 +22,15 @@ on:
 jobs:
   zizmor:
     # `zizmor.yml` declares no `permissions:` of its own, so this job's
+  gitleaks:
+    # `gitleaks.yml` declares no `permissions:` of its own, so this job's
     # grant flows straight through to its steps: `contents: read` for the
     # checkout steps, `security-events: write` for the SARIF upload.
     permissions:
       contents: read
       security-events: write
     uses: ./.github/workflows/zizmor.yml
+    uses: ./.github/workflows/gitleaks.yml
     with:
       scan_mode: all
       report_formats: sarif

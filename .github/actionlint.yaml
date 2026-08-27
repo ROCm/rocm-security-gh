@@ -3,5 +3,6 @@
 # See https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
 paths:
   .github/workflows/zizmor.yml:
+  .github/workflows/gitleaks.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined'
