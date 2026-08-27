@@ -32,25 +32,20 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
 
 from security_scanners.utils.binary_checksums import (
     download_and_verify_file,
     expected_sha256,
 )
-from security_scanners.utils.github_actions_api import import_github_actions_api
+from security_scanners.utils.github_actions_api import (
+    gha_append_step_summary,
+    gha_load_github_event,
+    gha_set_output,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 log = logging.getLogger(__name__)
-
-
-class _GithubActionsApi(NamedTuple):
-    """The subset of workflow-command helpers this script uses."""
-
-    append_step_summary: Callable[[str], None]
-    load_github_event: Callable[[], Mapping[str, object]]
-    set_output: Callable[[Mapping[str, str]], None]
 
 
 # Keep in sync with the `report_formats` input in
@@ -110,7 +105,7 @@ def _md_code_fence(content: str) -> str:
 
 def _emit_non_sarif_reports(
     non_sarif: list[_ReportTarget],
-    gha_append_step_summary: Callable[[str], None],
+    append_step_summary: Callable[[str], None],
 ) -> None:
     """Surface non-SARIF reports in logs and step summary."""
     summary_chunks: list[str] = []
@@ -128,7 +123,7 @@ def _emit_non_sarif_reports(
             f"### Bandit report: `{path}`\n\n{fence}\n{content}\n{fence}"
         )
     if summary_chunks:
-        gha_append_step_summary("\n\n".join(summary_chunks))
+        append_step_summary("\n\n".join(summary_chunks))
 
 
 def get_bandit_binary() -> Path:
@@ -591,12 +586,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
-    gha_api = import_github_actions_api()
-    gha = _GithubActionsApi(
-        append_step_summary=gha_api.append_step_summary,
-        load_github_event=gha_api.load_github_event,
-        set_output=gha_api.set_output,
-    )
     args = build_parser().parse_args(argv)
 
     try:
@@ -617,7 +606,7 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha.load_github_event()
+        event = gha_load_github_event()
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
         return 2
@@ -667,7 +656,7 @@ def main(argv: list[str]) -> int:
 
     # 'changed' mode with nothing to scan: emit empty paths so uploads skip.
     if files is not None and not files:
-        gha.set_output({"sarif_path": "", "non_sarif_paths": ""})
+        gha_set_output({"sarif_path": "", "non_sarif_paths": ""})
         return 0
 
     try:
@@ -679,7 +668,7 @@ def main(argv: list[str]) -> int:
             files=files,
             scan_path=source_dir,
         )
-        gha.set_output(
+        gha_set_output(
             {
                 "sarif_path": (
                     str(sarif_target.path)
@@ -693,7 +682,7 @@ def main(argv: list[str]) -> int:
         )
     except RuntimeError as exc:
         log.error("%s", exc)
-        _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+        _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
         return 2
     except Exception:
         # get_bandit_binary()/_run_bandit() can also fail with exception
@@ -702,7 +691,7 @@ def main(argv: list[str]) -> int:
         # to exit code 2, so this is a deliberately broad catch-all at
         # main()'s top-level error boundary.
         log.exception("bandit install or scan failed unexpectedly")
-        _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+        _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
         return 2
 
     threshold = args.severity_threshold.upper()
@@ -714,7 +703,7 @@ def main(argv: list[str]) -> int:
         summary += ", " + ", ".join(f"{sev}={n}" for sev, n in extra.items())
     log.info("Bandit findings: %s", summary)
 
-    _emit_non_sarif_reports(non_sarif, gha.append_step_summary)
+    _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
 
     if failing:
         log.error(

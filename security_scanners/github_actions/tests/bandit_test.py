@@ -19,7 +19,6 @@ from bandit import (
     _determine_changed_python_files,
     _diff_range,
     _enrich_sarif_with_security_severity,
-    _GithubActionsApi,
     _parse_report_formats,
     _resolve_config_path,
     _tally_findings_by_severity,
@@ -31,13 +30,6 @@ from bandit import (
 class MainTest(unittest.TestCase):
     """Tests for main()'s documented exit-code contract."""
 
-    def _stub_gha(self, set_output=None) -> _GithubActionsApi:
-        return _GithubActionsApi(
-            append_step_summary=lambda summary: None,
-            load_github_event=lambda: {},
-            set_output=set_output or (lambda outputs: None),
-        )
-
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
         # get_bandit_binary()/_run_bandit() can fail with exception types
         # other than RuntimeError (e.g. OSError from a pip/network
@@ -45,10 +37,9 @@ class MainTest(unittest.TestCase):
         # module's documented contract, not escape main() as an
         # unhandled exception.
         with (
-            mock.patch(
-                "bandit.import_github_actions_api",
-                return_value=self._stub_gha(),
-            ),
+            mock.patch("bandit.gha_load_github_event", return_value={}),
+            mock.patch("bandit.gha_append_step_summary"),
+            mock.patch("bandit.gha_set_output"),
             mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
             mock.patch("bandit.get_bandit_binary", side_effect=OSError("network down")),
         ):
@@ -60,12 +51,10 @@ class MainTest(unittest.TestCase):
         # step runs whenever `sarif_path != ''`, so reporting the path
         # ahead of (or despite) a failed run would make that step fire
         # against a missing file and mask the real failure.
-        set_output = mock.Mock()
         with (
-            mock.patch(
-                "bandit.import_github_actions_api",
-                return_value=self._stub_gha(set_output=set_output),
-            ),
+            mock.patch("bandit.gha_load_github_event", return_value={}),
+            mock.patch("bandit.gha_append_step_summary"),
+            mock.patch("bandit.gha_set_output") as set_output,
             mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
             mock.patch(
                 "bandit.get_bandit_binary",
@@ -81,8 +70,6 @@ class MainTest(unittest.TestCase):
         # A multi-format run can write some reports before a later
         # format fails; only the reports that actually landed on disk
         # should be reported, never a path for a format that never ran.
-        set_output = mock.Mock()
-
         def fake_run_bandit(binary, targets, *, config_path, files, scan_path):
             for tgt in targets:
                 if tgt.fmt == "sarif":
@@ -96,10 +83,9 @@ class MainTest(unittest.TestCase):
             os.chdir(tmp)
             try:
                 with (
-                    mock.patch(
-                        "bandit.import_github_actions_api",
-                        return_value=self._stub_gha(set_output=set_output),
-                    ),
+                    mock.patch("bandit.gha_load_github_event", return_value={}),
+                    mock.patch("bandit.gha_append_step_summary"),
+                    mock.patch("bandit.gha_set_output"),
                     mock.patch(
                         "bandit._resolve_config_path", return_value="bandit.yaml"
                     ),
