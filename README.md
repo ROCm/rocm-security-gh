@@ -85,6 +85,6 @@ different things:
    ```
 
 Pin `@main` to a tag or commit SHA once this workflow has a release; see
-`.github/workflows/weekly_security.yml` and
-`.github/workflows/pre_commit_security.yml` in this repo for the versions
+`.github/workflows/weekly-security-scan.yml` and
+`.github/workflows/pr-security-scan.yml` in this repo for the versions
 used to scan `rocm-security-gh` itself.

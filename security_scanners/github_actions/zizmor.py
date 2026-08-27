@@ -62,8 +62,8 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "github": "txt",
 }
 _ZIZMOR_VERSION = "1.24.1"
-# Mirrored to the rocm-third-party-deps S3 bucket (see
-# docs/development/git_chores.md) so CI doesn't depend on github.com.
+# Mirrored to the rocm-third-party-deps S3 bucket so CI doesn't depend on
+# github.com; the mirrored object's digest is pinned in `checksums.sha256`.
 # Unlike gitleaks'/trivy's release assets, zizmor's own filename doesn't
 # embed a version, and it's mirrored under that same unversioned name --
 # so a version bump MUST re-verify and replace both the mirrored object
@@ -199,7 +199,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         ext = _SUPPORTED_FORMATS.get(fmt)
         if ext is None:
             raise ValueError(
-                f"Invalid report_format '{fmt}' "
+                f"Invalid report_formats entry '{fmt}' "
                 f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"zizmor-report.{ext}")))
