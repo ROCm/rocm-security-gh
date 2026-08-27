@@ -226,7 +226,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         ext = _SUPPORTED_FORMATS.get(fmt)
         if ext is None:
             raise ValueError(
-                f"Invalid report_format '{fmt}' "
+                f"Invalid report_formats entry '{fmt}' "
                 f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"bandit-report.{ext}")))

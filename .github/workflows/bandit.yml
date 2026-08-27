@@ -73,6 +73,13 @@ jobs:
           ref: ${{ job.workflow_sha }}
           persist-credentials: false
 
+      # Set up before any step that runs a scanner script, so the version
+      # is pinned here rather than inherited from the runner image.
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
       - name: Compute checkout fetch-depth
         id: depth
         run: python -m security_scanners.utils.compute_pr_depth
@@ -83,11 +90,6 @@ jobs:
           fetch-depth: ${{ steps.depth.outputs.value }}
           path: .scan-target
           persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
 
       - name: Run bandit
         id: scan

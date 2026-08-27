@@ -3,7 +3,7 @@
 #
 # Weekly security scan: runs on a fixed cadence and pushes SARIF findings
 # to the repository's code-scanning Security tab. Complements the PR-side
-# jobs in `pre_commit_security.yml`, which scan only what changed in a PR
+# jobs in `pr-security-scan.yml`, which scan only what changed in a PR
 # and upload plain-text/CSV artifacts for in-review browsing. Sibling
 # scanners can be added as additional jobs in this file as they come
 # online, keeping all scheduled security scans discoverable in one place.
