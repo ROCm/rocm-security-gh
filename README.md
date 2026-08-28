@@ -22,7 +22,7 @@ than run an unverified binary.
 
 ## Scanners
 
-`.github/workflows/security-scan.yml` is the single `workflow_call`
+`.github/workflows/security-baseline.yml` is the single `workflow_call`
 entry point every ROCm repository calls. One job in the caller fans out
 to one isolated job per scanner, which means:
 
@@ -118,7 +118,7 @@ every repository -- no per-scanner jobs to add or maintain.
      contents: read
    jobs:
      security:
-       uses: ROCm/rocm-security-gh/.github/workflows/security-scan.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@main
        with:
          report_formats: human
    ```
@@ -140,7 +140,7 @@ every repository -- no per-scanner jobs to add or maintain.
        permissions:
          contents: read
          security-events: write
-       uses: ROCm/rocm-security-gh/.github/workflows/security-scan.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@main
        with:
          scan_mode: all
          report_formats: sarif

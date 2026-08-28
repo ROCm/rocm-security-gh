@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: MIT
 #
 # The single entry point every ROCm repository calls. One job in the caller
-# fans out to one isolated job per scanner.
+# fans out to one isolated job per scanner. Named a baseline because the
+# caller only describes its event: which scanners run and what severity
+# fails them are org policy, not inputs.
 
-name: Security scan
+name: Security baseline
 
 on:
   workflow_call:

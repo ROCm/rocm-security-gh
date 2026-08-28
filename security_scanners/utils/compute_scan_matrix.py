@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Render the job matrix `security-scan.yml` fans out to.
+"""Render the job matrix `security-baseline.yml` fans out to.
 
 `SCANNERS` below is the org-wide policy: every scanner listed here runs
 against every repository that calls the workflow. There is deliberately no

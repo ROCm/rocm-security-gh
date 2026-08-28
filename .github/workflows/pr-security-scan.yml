@@ -23,6 +23,6 @@ jobs:
   # tab. Nothing reaches the Security tab, so fork PRs behave
   # identically to same-repo PRs.
   security:
-    uses: ./.github/workflows/security-scan.yml
+    uses: ./.github/workflows/security-baseline.yml
     with:
       report_formats: human
