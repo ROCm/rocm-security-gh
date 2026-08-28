@@ -26,9 +26,11 @@ than run an unverified binary.
 entry point every ROCm repository calls. One job in the caller fans out
 to one isolated job per scanner, which means:
 
-- **Adding a scanner is a change here only.** Callers that leave
-  `scanners` at its default pick up new scanners on their next run,
-  with no pull request against their repository.
+- **What runs is org policy, not a repository setting.** Which scanners
+  run and the severity that fails them are not inputs. A repository
+  cannot opt out of a scanner or relax a threshold, and every
+  repository picks up a newly added scanner on its next run without a
+  pull request against it.
 - **Scanners stay isolated.** Each one gets its own runner, its own
   workspace and its own check run, so no scanner can see another's
   leftover report files, and an individual scanner can be made a
@@ -38,14 +40,16 @@ to one isolated job per scanner, which means:
   for `report_formats: human` and every scanner produces whatever its
   reviewer-readable format happens to be called.
 
-Inputs, all optional: `scanners`, `scan_mode`, `report_formats`,
-`scan_path`, `severity_threshold`, and `persona`. The input descriptions
-in the workflow file are the authoritative reference. Inputs that only
-some scanners understand are ignored by the rest, so
-`severity_threshold` has no effect on gitleaks and `persona` has none
-outside zizmor.
+Inputs, all optional, describe the calling event and who reads the
+output: `scan_mode`, `report_formats` and `scan_path`. The input
+descriptions in the workflow file are the authoritative reference.
 
-The scanners below are what `scanners` accepts today.
+To change policy, edit this repository: `SCANNERS` in
+`security_scanners/utils/compute_scan_matrix.py` decides which scanners
+run, and each scanner script's own defaults decide the severity that
+fails it and how sensitively it reports.
+
+The scanners below are what runs today.
 
 ### Zizmor
 
@@ -57,14 +61,14 @@ action references pinned to a mutable tag, credentials left on disk for
 later steps -- grading each finding by severity and confidence so a gate
 can fail on the serious ones while a reviewer triages the rest.
 
-- `scanners` name: `zizmor`
+- Check run: `zizmor`
 - `report_formats`: `sarif` (default), `json`, `plain`, `github`, and
   `human` (an alias for `plain`)
 - `scan_mode: changed` audits only the workflow / composite-action /
   dependabot files the calling event touched.
-- Honors `severity_threshold` (`high` by default) to set which severity
-  fails the job, and `persona` (`regular` by default) to widen or narrow
-  what zizmor reports.
+- Fails on findings at or above HIGH severity; reports still carry every
+  finding. Audits with zizmor's `regular` persona, which surfaces
+  high-signal findings rather than everything zizmor knows about.
 
 ### Gitleaks
 
@@ -75,12 +79,12 @@ built-in detection rules plus any repo-specific rules in `gitleaks.toml`,
 so a secret is caught even after it has been removed from the working
 tree.
 
-- `scanners` name: `gitleaks`
+- Check run: `gitleaks`
 - `report_formats`: `sarif` (default), `json`, `csv`, `junit`, and
   `human` (an alias for `csv`)
 - `scan_mode: changed` scans only the commits the calling event
   introduced, and requires a `pull_request` or `push` payload.
-- Ignores `severity_threshold`: every leak is a finding.
+- Has no severity scale: every leak fails the job.
 
 ## Consuming these workflows from another repo
 
@@ -142,10 +146,9 @@ every repository -- no per-scanner jobs to add or maintain.
          report_formats: sarif
    ```
 
-To opt out of a scanner, name the ones you want (`scanners: gitleaks`) --
-but note that pinning the list also opts out of scanners added later. An
-unrecognised name fails the workflow rather than being skipped, so a typo
-can't silently drop a scanner from the run.
+There is no opt-out. If a scanner is wrong for your repository, raise it
+here rather than working around it locally, so the exception is visible
+and reviewed in one place.
 
 Pin `@main` to a tag or commit SHA once these workflows have a release; see
 `.github/workflows/weekly-security-scan.yml` and

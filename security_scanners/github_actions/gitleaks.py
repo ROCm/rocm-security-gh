@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 
 
 # Keep in sync with the `report_formats` input in
-# `.github/workflows/gitleaks.yml`.
+# `.github/workflows/security-scan.yml`.
 _SUPPORTED_FORMATS: dict[str, str] = {
     "sarif": "sarif",
     "json": "json",

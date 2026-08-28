@@ -54,7 +54,7 @@ class _GithubActionsApi(NamedTuple):
 
 
 # Keep in sync with the `report_formats` input in
-# `.github/workflows/zizmor.yml`.
+# `.github/workflows/security-scan.yml`.
 _SUPPORTED_FORMATS: dict[str, str] = {
     "sarif": "sarif",
     "json": "json",

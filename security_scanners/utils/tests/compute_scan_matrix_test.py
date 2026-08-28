@@ -9,70 +9,38 @@ from security_scanners.utils.compute_scan_matrix import (
     SCANNERS,
     build_matrix,
     main,
-    parse_scanners,
 )
 
 
-class ParseScannersTest(unittest.TestCase):
-    """Tests for compute_scan_matrix.parse_scanners."""
+class ScannerRegistryTest(unittest.TestCase):
+    """Tests for the `SCANNERS` policy list."""
 
-    def test_single_scanner(self):
-        self.assertEqual([s.name for s in parse_scanners("gitleaks")], ["gitleaks"])
+    def test_names_are_unique(self):
+        names = [spec.name for spec in SCANNERS]
+        self.assertCountEqual(names, set(names))
 
-    def test_preserves_input_order(self):
-        self.assertEqual(
-            [s.name for s in parse_scanners("zizmor,gitleaks")],
-            ["zizmor", "gitleaks"],
-        )
-
-    def test_tolerates_whitespace_and_case(self):
-        self.assertEqual(
-            [s.name for s in parse_scanners(" GitLeaks , zizmor ")],
-            ["gitleaks", "zizmor"],
-        )
-
-    def test_deduplicates(self):
-        self.assertEqual(
-            [s.name for s in parse_scanners("zizmor,zizmor")],
-            ["zizmor"],
-        )
-
-    def test_unknown_scanner_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            parse_scanners("gitleaks,semgrep")
-        self.assertIn("semgrep", str(ctx.exception))
-
-    def test_unknown_scanner_lists_valid_names(self):
-        with self.assertRaises(ValueError) as ctx:
-            parse_scanners("nope")
+    def test_modules_are_importable(self):
         for spec in SCANNERS:
-            self.assertIn(spec.name, str(ctx.exception))
+            __import__(spec.module)
 
-    def test_empty_raises(self):
-        with self.assertRaises(ValueError):
-            parse_scanners("")
+    def test_runner_labels_are_pinned_not_latest(self):
+        for spec in SCANNERS:
+            self.assertNotIn("latest", spec.runner)
 
-    def test_only_separators_raises(self):
-        with self.assertRaises(ValueError):
-            parse_scanners(" , , ")
-
-    def test_every_registered_scanner_is_selectable(self):
-        names = ",".join(spec.name for spec in SCANNERS)
-        self.assertEqual(
-            [s.name for s in parse_scanners(names)],
-            [spec.name for spec in SCANNERS],
-        )
+    def test_every_scanner_has_a_timeout(self):
+        for spec in SCANNERS:
+            self.assertGreater(spec.timeout_minutes, 0)
 
 
 class BuildMatrixTest(unittest.TestCase):
     """Tests for compute_scan_matrix.build_matrix."""
 
     def test_emits_one_entry_per_scanner(self):
-        entries = json.loads(build_matrix(list(SCANNERS)))
+        entries = json.loads(build_matrix(SCANNERS))
         self.assertEqual(len(entries), len(SCANNERS))
 
     def test_entry_carries_everything_the_workflow_needs(self):
-        entries = json.loads(build_matrix(parse_scanners("gitleaks")))
+        entries = json.loads(build_matrix(SCANNERS[:1]))
         self.assertEqual(
             entries[0],
             {
@@ -84,29 +52,20 @@ class BuildMatrixTest(unittest.TestCase):
         )
 
     def test_output_is_valid_json_for_fromjson(self):
-        self.assertIsInstance(json.loads(build_matrix(list(SCANNERS))), list)
+        self.assertIsInstance(json.loads(build_matrix(SCANNERS)), list)
 
-    def test_runner_labels_are_pinned_not_latest(self):
-        for spec in SCANNERS:
-            self.assertNotIn("latest", spec.runner)
-
-    def test_modules_are_importable(self):
-        for spec in SCANNERS:
-            __import__(spec.module)
+    def test_preserves_registry_order(self):
+        entries = json.loads(build_matrix(SCANNERS))
+        self.assertEqual(
+            [e["scanner"] for e in entries],
+            [spec.name for spec in SCANNERS],
+        )
 
 
 class MainTest(unittest.TestCase):
     """Tests for compute_scan_matrix.main."""
 
-    def test_sets_matrix_output(self):
-        with mock.patch(
-            "security_scanners.utils.compute_scan_matrix.gha_set_output"
-        ) as set_output:
-            self.assertEqual(main(["--scanners", "zizmor"]), 0)
-        entries = json.loads(set_output.call_args.args[0]["matrix"])
-        self.assertEqual([e["scanner"] for e in entries], ["zizmor"])
-
-    def test_defaults_to_every_scanner(self):
+    def test_sets_matrix_output_for_every_scanner(self):
         with mock.patch(
             "security_scanners.utils.compute_scan_matrix.gha_set_output"
         ) as set_output:
@@ -117,12 +76,9 @@ class MainTest(unittest.TestCase):
             [spec.name for spec in SCANNERS],
         )
 
-    def test_unknown_scanner_fails_without_setting_output(self):
-        with mock.patch(
-            "security_scanners.utils.compute_scan_matrix.gha_set_output"
-        ) as set_output:
-            self.assertEqual(main(["--scanners", "semgrep"]), 1)
-        set_output.assert_not_called()
+    def test_takes_no_arguments_so_callers_cannot_select_scanners(self):
+        with self.assertRaises(SystemExit):
+            main(["--scanners", "gitleaks"])
 
 
 if __name__ == "__main__":

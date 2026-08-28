@@ -12,16 +12,9 @@ on:
   # Run every Saturday at 10:00 UTC.
   schedule:
     - cron: "0 10 * * 6"
-  # Allow re-running the weekly scan on demand, e.g. after tweaking a
-  # scanner's config or rotating its version pin, so the Security tab can
-  # be refreshed without an unrelated commit.
   workflow_dispatch:
 
 jobs:
-  # `security-scan.yml` declares no `permissions:` of its own, so this
-  # job's grant flows straight through to every scanner job it fans out
-  # to: `contents: read` for the checkout steps, `security-events: write`
-  # for the SARIF uploads. New scanners are picked up here automatically.
   security:
     permissions:
       contents: read
