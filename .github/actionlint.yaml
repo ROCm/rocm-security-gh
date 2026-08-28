@@ -2,6 +2,9 @@
 # job.workflow_sha (added to GitHub Actions for reusable workflows).
 # See https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
 paths:
-  .github/workflows/bandit.yml:
+  # One glob covers every scanner's reusable workflow, so a new scanner
+  # needs no change here. The ignored message is scoped to these two
+  # properties, so a genuine typo in a `job.*` expression is still reported.
+  .github/workflows/*.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined'
