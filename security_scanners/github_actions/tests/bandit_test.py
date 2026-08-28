@@ -1,6 +1,7 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -105,6 +106,61 @@ class MainTest(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
         self.assertEqual(rc, 2)
+
+
+class SeverityGateTest(unittest.TestCase):
+    """Tests for the severity threshold that decides pass (0) vs fail (1)."""
+
+    def _main_with_counts(self, counts: dict[str, int], threshold: str) -> int:
+        """Run main() over a scan that reported `counts`, and return its exit code."""
+        with (
+            mock.patch("bandit.gha_append_step_summary"),
+            mock.patch("bandit.gha_set_output"),
+            mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
+            mock.patch("bandit.get_bandit_binary", return_value=Path("bandit")),
+            mock.patch("bandit._run_bandit", return_value=counts),
+        ):
+            return main(
+                [
+                    "--scan-mode",
+                    "all",
+                    "--source-dir",
+                    ".",
+                    "--severity-threshold",
+                    threshold,
+                ]
+            )
+
+    def test_threshold_decides_the_exit_code(self):
+        # The gate is inclusive: a finding *at* the threshold fails the
+        # job, anything strictly below it passes while still being
+        # reported. Each threshold is checked at its own boundary, since
+        # an off-by-one in _SEVERITY_ORDER slicing would either let HIGH
+        # findings through or fail every job that has a LOW note.
+        cases = [
+            ("high", {"LOW": 0, "MEDIUM": 0, "HIGH": 1}, 1),
+            ("high", {"LOW": 7, "MEDIUM": 4, "HIGH": 0}, 0),
+            ("medium", {"LOW": 0, "MEDIUM": 1, "HIGH": 0}, 1),
+            ("medium", {"LOW": 0, "MEDIUM": 0, "HIGH": 1}, 1),
+            ("medium", {"LOW": 7, "MEDIUM": 0, "HIGH": 0}, 0),
+            ("low", {"LOW": 1, "MEDIUM": 0, "HIGH": 0}, 1),
+            ("low", {"LOW": 0, "MEDIUM": 0, "HIGH": 0}, 0),
+        ]
+        for threshold, counts, expected in cases:
+            with self.subTest(threshold=threshold, counts=counts):
+                self.assertEqual(self._main_with_counts(counts, threshold), expected)
+
+    def test_clean_scan_passes(self):
+        counts = {sev: 0 for sev in _SEVERITY_ORDER}
+        self.assertEqual(self._main_with_counts(counts, "high"), 0)
+
+    def test_severity_bandit_does_not_grade_never_fails_the_job(self):
+        # _tally_findings_by_severity passes through any severity string
+        # bandit emits, including one this script doesn't rank. Such a
+        # finding is logged but must not be silently treated as failing:
+        # only the ranked severities feed the gate.
+        counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "UNDEFINED": 3}
+        self.assertEqual(self._main_with_counts(counts, "high"), 0)
 
 
 class ParseReportFormatsTest(unittest.TestCase):
@@ -281,6 +337,24 @@ class EnrichSarifSeverityTest(unittest.TestCase):
         self.assertEqual(results[0]["properties"]["security-severity"], "8.5")
         self.assertEqual(results[1]["properties"]["security-severity"], "1.0")
 
+    def test_warns_when_no_result_carries_an_issue_severity(self):
+        # Enrichment reads bandit's own `properties.issue_severity`. If a
+        # future release renames or drops that field, every finding would
+        # quietly lose its Security-tab tier, so the no-op is reported
+        # rather than passed over in silence.
+        path = self._write_sarif(
+            {"runs": [{"results": [{"ruleId": "B602"}, {"ruleId": "B404"}]}]}
+        )
+        with self.assertLogs("bandit", level="WARNING") as logs:
+            _enrich_sarif_with_security_severity(path)
+        self.assertIn("issue_severity", logs.output[0])
+
+    def test_no_warning_when_there_is_simply_nothing_to_enrich(self):
+        path = self._write_sarif({"runs": [{"results": []}]})
+        with mock.patch("bandit.log") as logger:
+            _enrich_sarif_with_security_severity(path)
+        logger.warning.assert_not_called()
+
     def test_preserves_existing_security_severity(self):
         path = self._write_sarif(
             {
@@ -403,9 +477,14 @@ class GetBanditBinaryTest(unittest.TestCase):
         dest_path.write_bytes(b"fake sdist contents")
         return dest_path
 
-    def test_reuses_cached_sdist_without_redownloading(self):
-        self._sdist_path.write_bytes(b"already downloaded")
+    def test_reuses_cached_sdist_once_its_digest_is_verified(self):
+        cached = b"already downloaded"
+        self._sdist_path.write_bytes(cached)
         with (
+            mock.patch(
+                "bandit.expected_sha256",
+                return_value=hashlib.sha256(cached).hexdigest(),
+            ),
             mock.patch("bandit.download_and_verify_file") as download,
             mock.patch("bandit.subprocess.run") as run,
         ):
@@ -419,6 +498,20 @@ class GetBanditBinaryTest(unittest.TestCase):
                 self._binary.write_text("#!/bin/sh\n", encoding="utf-8")
                 get_bandit_binary()
         download.assert_not_called()
+
+    def test_cached_sdist_with_an_unexpected_digest_is_never_installed(self):
+        # A cache hit must not be a way around verification: whatever is
+        # already sitting at the sdist path is checked against
+        # checksums.sha256 before pip is allowed near it.
+        self._sdist_path.write_bytes(b"tampered")
+        with (
+            mock.patch("bandit.expected_sha256", return_value="a" * 64),
+            mock.patch("bandit.subprocess.run") as run,
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            get_bandit_binary()
+        self.assertIn("Refusing to use this artifact", str(ctx.exception))
+        run.assert_not_called()
 
     def test_downloads_verifies_installs_and_checks_version(self):
         with (

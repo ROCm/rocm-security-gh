@@ -34,8 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from security_scanners.utils.binary_checksums import (
+    CHECKSUMS_FILENAME,
     download_and_verify_file,
     expected_sha256,
+    sha256_of,
 )
 from security_scanners.utils.github_actions_api import (
     gha_append_step_summary,
@@ -49,16 +51,19 @@ log = logging.getLogger(__name__)
 
 
 # Keep in sync with the `report_formats` input in
-# `.github/workflows/bandit.yml`.
-_SUPPORTED_FORMATS: dict[str, str] = {
-    "sarif": "sarif",
-    "json": "json",
-    "csv": "csv",
-    "html": "html",
-    "xml": "xml",
-    "yaml": "yaml",
-    "txt": "txt",
-}
+# `.github/workflows/bandit.yml`. Every one of bandit's format names is
+# also the right file extension for what it writes, so the report path
+# is derived from the format name; scanners where that isn't true (e.g.
+# gitleaks' `junit`, which writes XML) need an explicit mapping instead.
+_SUPPORTED_FORMATS: tuple[str, ...] = (
+    "sarif",
+    "json",
+    "csv",
+    "html",
+    "xml",
+    "yaml",
+    "txt",
+)
 _BANDIT_VERSION = "1.9.4"
 _BANDIT_EXTRAS = "sarif"
 # PyPI sdist filenames are always version-qualified, unlike some other
@@ -151,8 +156,26 @@ def get_bandit_binary() -> Path:
     """
     install_root = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
     sdist_path = install_root / _BANDIT_SDIST_FILENAME
-    if not sdist_path.is_file():
-        expected_sha = expected_sha256(REPO_ROOT, _BANDIT_SDIST_FILENAME)
+    expected_sha = expected_sha256(REPO_ROOT, _BANDIT_SDIST_FILENAME)
+    if sdist_path.is_file():
+        # Verify the cached sdist as well, not just freshly downloaded
+        # ones. A file already sitting at this path (job re-run, reused
+        # RUNNER_TEMP, self-hosted runner) would otherwise reach pip
+        # without any integrity check, which is not what
+        # `checksums.sha256` promises. Fails closed rather than
+        # re-downloading over it: the filename pins an exact release, so
+        # a digest mismatch there is tampering or corruption, not
+        # staleness, and silently replacing the evidence would hide it.
+        actual_sha = sha256_of(sdist_path)
+        if actual_sha != expected_sha:
+            raise RuntimeError(
+                f"cached bandit sdist at {sdist_path} has SHA256 "
+                f"{actual_sha}, expected {expected_sha} (from "
+                f"{CHECKSUMS_FILENAME}). Refusing to use this artifact; "
+                "delete the file to force a fresh download."
+            )
+        log.info("Reusing verified bandit sdist at %s", sdist_path)
+    else:
         log.info("Downloading bandit v%s from %s", _BANDIT_VERSION, _BANDIT_SDIST_URL)
         download_and_verify_file(
             url=_BANDIT_SDIST_URL,
@@ -218,13 +241,12 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         if not fmt or fmt in seen:
             continue
         seen.add(fmt)
-        ext = _SUPPORTED_FORMATS.get(fmt)
-        if ext is None:
+        if fmt not in _SUPPORTED_FORMATS:
             raise ValueError(
                 f"Invalid report_formats entry '{fmt}' "
                 f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
             )
-        targets.append(_ReportTarget(fmt=fmt, path=Path(f"bandit-report.{ext}")))
+        targets.append(_ReportTarget(fmt=fmt, path=Path(f"bandit-report.{fmt}")))
     if not targets:
         raise ValueError(
             "report_formats is empty (expected one or more of: "
@@ -263,6 +285,13 @@ def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str]
     `None` means "no diff range applicable" (workflow_dispatch,
     schedule, new ref push, missing SHAs, etc.) and instructs callers
     to fall back to a full scan.
+
+    `pull_request_target` carries the same payload shape as
+    `pull_request` and is accepted for callers that trigger on it, even
+    though nothing in this repo does. Its default checkout is the base
+    commit, so if such a caller doesn't fetch the PR head, the diff
+    downstream simply fails and the scan widens to the whole tree --
+    the failure mode is scanning more than asked, never less.
     """
     if event_name in ("pull_request", "pull_request_target"):
         base = _event_str(event, "pull_request", "base", "sha")
@@ -470,12 +499,26 @@ def _enrich_sarif_with_security_severity(sarif_path: Path) -> None:
             enriched += 1
 
     if enriched == 0:
-        log.debug(
-            "SARIF severity enrichment: nothing to add (%d preserved, %d unknown) in %s",
-            preserved,
-            unknown,
-            sarif_path,
-        )
+        if unknown:
+            # Loud rather than silent: bandit's SARIF formatter is the
+            # only source of `properties.issue_severity`, so results
+            # arriving without one mean the pinned release changed shape
+            # and every finding is now tiered by `level` alone.
+            log.warning(
+                "SARIF severity enrichment added nothing: %d result(s) in %s carry "
+                "no recognised properties.issue_severity. bandit %s emits it; a "
+                "release that renames or drops the field leaves the Security tab "
+                "tiering findings by 'level' alone.",
+                unknown,
+                sarif_path,
+                _BANDIT_VERSION,
+            )
+        else:
+            log.debug(
+                "SARIF severity enrichment: nothing to add (%d preserved) in %s",
+                preserved,
+                sarif_path,
+            )
         return
 
     try:
@@ -606,20 +649,22 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha_load_github_event()
+        # Only 'changed' mode needs the event payload, to work out the
+        # diff range. Loading it unconditionally would make 'all' mode
+        # fail on events that have no payload we can parse, even though
+        # it never looks at one.
+        if args.scan_mode == "all":
+            files: list[Path] | None = None
+        else:
+            files = _determine_changed_python_files(
+                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+                event=gha_load_github_event(),
+                scan_path=source_dir,
+                checkout_root=checkout_root,
+            )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
         return 2
-
-    if args.scan_mode == "all":
-        files: list[Path] | None = None
-    else:
-        files = _determine_changed_python_files(
-            event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-            event=event,
-            scan_path=source_dir,
-            checkout_root=checkout_root,
-        )
 
     if files is None:
         log.info(
