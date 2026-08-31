@@ -2,18 +2,26 @@
 # SPDX-License-Identifier: MIT
 #
 # Pre-commit security gate: fast, PR-side security scanners that run on
-# every pull request. The security counterpart to `pre-commit.yml`.
-# Sibling scanners can be added as additional jobs in this file as they
-# come online, keeping all PR-side security gates discoverable in one
-# place.
+# every pull request. The security counterpart to `pre-commit.yml`. The
+# set of scanners lives in `security-baseline.yml`, so scanners coming
+# online are picked up here without touching this file.
 
 name: PR security scan
 
 on:
   pull_request:
+    # GitHub's defaults, spelled out: a scan is only meaningful when the
+    # PR appears or its head moves.
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+
+# A scan of a superseded commit tells reviewers nothing, so let a new push
+# cancel the run it replaces rather than queueing behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   # Every scanner, restricted to what this PR touched (`scan_mode:

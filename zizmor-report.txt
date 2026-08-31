@@ -1,0 +1,41 @@
+warning[dependabot-cooldown]: insufficient cooldown in Dependabot updates
+ --> ./.github/dependabot.yml:9:5
+  |
+9 |   - package-ecosystem: "github-actions"
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing cooldown configuration
+  |
+  = note: audit confidence → High
+  = note: this finding has an auto-fix
+  = help: audit documentation → https://docs.zizmor.sh/audits/#dependabot-cooldown
+
+warning[dependabot-cooldown]: insufficient cooldown in Dependabot updates
+  --> ./.github/dependabot.yml:32:5
+   |
+32 |   - package-ecosystem: "pre-commit"
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing cooldown configuration
+   |
+   = note: audit confidence → High
+   = note: this finding has an auto-fix
+   = help: audit documentation → https://docs.zizmor.sh/audits/#dependabot-cooldown
+
+warning[artipacked]: credential persistence through GitHub Actions artifacts
+  --> ./.github/workflows/pre-commit.yml:18:9
+   |
+18 |       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ does not set persist-credentials: false
+   |
+   = note: audit confidence → Low
+   = note: this finding has an auto-fix
+   = help: audit documentation → https://docs.zizmor.sh/audits/#artipacked
+
+warning[artipacked]: credential persistence through GitHub Actions artifacts
+  --> ./.github/workflows/unit-tests.yml:24:9
+   |
+24 |       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ does not set persist-credentials: false
+   |
+   = note: audit confidence → Low
+   = note: this finding has an auto-fix
+   = help: audit documentation → https://docs.zizmor.sh/audits/#artipacked
+
+11 findings (7 suppressed, 4 fixable): 0 informational, 0 low, 4 medium, 0 high
