@@ -28,11 +28,11 @@ jobs:
     with:
       scan_mode: all
       report_formats: sarif
+
   zizmor:
     permissions:
       contents: read
       security-events: write
-    uses: ./.github/workflows/trivy.yml
     uses: ./.github/workflows/zizmor.yml
     with:
       scan_mode: all
