@@ -2,11 +2,9 @@
 # SPDX-License-Identifier: MIT
 #
 # Weekly security scan: runs on a fixed cadence and pushes SARIF findings
-# to the repository's code-scanning Security tab. Complements the PR-side
-# jobs in `pr-security-scan.yml`, which scan only what changed in a PR
-# and upload plain-text/CSV artifacts for in-review browsing. Sibling
-# scanners can be added as additional jobs in this file as they come
-# online, keeping all scheduled security scans discoverable in one place.
+# to the repository's code-scanning Security tab. Complements
+# `pr-security-scan.yml`, which scans only what changed in a PR and
+# uploads reviewer-readable artifacts for in-review browsing.
 
 name: Weekly security scan
 
@@ -14,44 +12,18 @@ on:
   # Run every Saturday at 10:00 UTC.
   schedule:
     - cron: "0 10 * * 6"
-  # Allow re-running the weekly scan on demand, e.g. after tweaking a
-  # scanner's config or rotating its version pin, so the Security tab can
-  # be refreshed without an unrelated commit.
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  trivy:
+  security:
+    # Only the job that uploads SARIF gets write access to code scanning.
     permissions:
       contents: read
       security-events: write
-    uses: ./.github/workflows/trivy.yml
-    with:
-      scan_mode: all
-      report_formats: sarif
-
-  zizmor:
-    permissions:
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/zizmor.yml
-    with:
-      scan_mode: all
-      report_formats: sarif
-
-  gitleaks:
-    permissions:
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/gitleaks.yml
-    with:
-      scan_mode: all
-      report_formats: sarif
-
-  bandit:
-    permissions:
-      contents: read
-      security-events: write
-    uses: ./.github/workflows/bandit.yml
+    uses: ./.github/workflows/security-baseline.yml
     with:
       scan_mode: all
       report_formats: sarif

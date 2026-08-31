@@ -1,0 +1,127 @@
+# Copyright Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# The single entry point every ROCm repository calls. One job in the caller
+# fans out to one isolated job per scanner. Named a baseline because the
+# caller only describes its event: which scanners run and what severity
+# fails them are org policy, not inputs.
+
+name: Security baseline
+
+on:
+  workflow_call:
+    inputs:
+      scan_mode:
+        description: >-
+          'changed' (default) restricts each scanner to what the calling
+          event touched -- commits for gitleaks, changed workflow files
+          for zizmor -- and requires a pull_request or push payload.
+          'all' scans everything in 'scan_path' and is required for
+          schedule, workflow_dispatch and release events.
+        required: false
+        type: string
+        default: changed
+      report_formats:
+        description: >-
+          Comma-separated list of report formats. 'sarif' (default) is
+          uploaded to GitHub code scanning; anything else is uploaded as a
+          build artifact and printed to the job summary. 'human' asks
+          each scanner for its own reviewer-readable format (csv for
+          gitleaks, plain for zizmor), so PR-time callers don't need to
+          know per-tool format names. Native names ('json', 'csv',
+          'plain', ...) still work but are only valid for the scanners
+          that support them.
+        required: false
+        type: string
+        default: sarif
+      scan_path:
+        description: >-
+          Path (relative to the repository root) to scan. Defaults to '.'
+          so the entire checkout is scanned; set to a subdirectory to
+          restrict the scan to that subtree. The path MUST exist after
+          checkout or the scan fails.
+        required: false
+        type: string
+        default: "."
+
+jobs:
+  plan:
+    name: Plan scanners
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compute scanner matrix
+        id: matrix
+        run: python -m security_scanners.utils.compute_scan_matrix
+
+  scan:
+    name: ${{ matrix.scanner }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Compute checkout fetch-depth
+        id: depth
+        run: python -m security_scanners.utils.compute_pr_depth
+
+      - name: Checkout scan target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ steps.depth.outputs.value }}
+          path: .scan-target
+          persist-credentials: false
+
+      - name: Run ${{ matrix.scanner }}
+        id: scan
+        env:
+          SCANNER_MODULE: ${{ matrix.module }}
+          SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
+          SCANNER_REPORT_FORMATS: ${{ inputs.report_formats }}
+          SCANNER_SOURCE_DIR: .scan-target/${{ inputs.scan_path }}
+          SCANNER_CHECKOUT_ROOT: .scan-target
+        run: python -m "${SCANNER_MODULE}"
+
+      - name: Upload SARIF report to code scanning
+        if: always() && steps.scan.outputs.sarif_path != ''
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif_path }}
+          category: ${{ matrix.scanner }}
+
+      - name: Upload non-SARIF reports
+        if: always() && steps.scan.outputs.non_sarif_paths != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.scanner }}-report
+          path: ${{ steps.scan.outputs.non_sarif_paths }}
+          if-no-files-found: ignore

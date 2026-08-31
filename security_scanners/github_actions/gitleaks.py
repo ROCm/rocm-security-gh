@@ -10,8 +10,8 @@ Exit codes:
 * `2` - input error: scan path missing, `gitleaks.toml` missing,
   `GITHUB_EVENT_PATH` malformed, or gitleaks itself errored.
 
-Inputs come from CLI flags or matching `GITLEAKS_*` env vars set by the
-workflow.
+Inputs come from CLI flags or the matching `SCANNER_*` env vars set by
+`.github/workflows/security-baseline.yml`.
 """
 
 import argparse
@@ -45,13 +45,17 @@ log = logging.getLogger(__name__)
 
 
 # Keep in sync with the `report_formats` input in
-# `.github/workflows/gitleaks.yml`.
+# `.github/workflows/security-baseline.yml`.
 _SUPPORTED_FORMATS: dict[str, str] = {
     "sarif": "sarif",
     "json": "json",
     "csv": "csv",
     "junit": "xml",
 }
+# Tool-independent aliases, so a caller can ask every scanner for "the
+# report a reviewer reads" without knowing that gitleaks spells it 'csv',
+# zizmor 'plain' and trivy 'table'.
+_FORMAT_ALIASES: dict[str, str] = {"human": "csv"}
 # Mirrored to the rocm-third-party-deps S3 bucket so CI doesn't depend on
 # github.com. When bumping the version, add the new tarball's digest to
 # `checksums.sha256` (see that file's header for the required provenance
@@ -158,7 +162,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     targets: list[_ReportTarget] = []
     seen: set[str] = set()
     for raw_fmt in raw.split(","):
-        fmt = raw_fmt.strip()
+        fmt = _FORMAT_ALIASES.get(raw_fmt.strip(), raw_fmt.strip())
         if not fmt or fmt in seen:
             continue
         seen.add(fmt)
@@ -166,7 +170,8 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         if ext is None:
             raise ValueError(
                 f"Invalid report_formats entry '{fmt}' "
-                f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
+                f"(expected one of: "
+                f"{', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"gitleaks-report.{ext}")))
     if not targets:
@@ -509,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--scan-mode",
-        default=os.environ.get("GITLEAKS_SCAN_MODE", "changed"),
+        default=os.environ.get("SCANNER_SCAN_MODE", "changed"),
         choices=("changed", "all"),
         help=(
             "'changed' (default) scans only commits introduced by the calling "
@@ -521,15 +526,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--report-formats",
-        default=os.environ.get("GITLEAKS_REPORT_FORMATS", "sarif"),
+        default=os.environ.get("SCANNER_REPORT_FORMATS", "sarif"),
         help=(
-            "Comma-separated list of gitleaks report formats. Allowed values: "
-            f"{', '.join(sorted(_SUPPORTED_FORMATS))}."
+            "Comma-separated list of gitleaks report formats. Allowed "
+            f"values: {', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))}. "
+            f"'human' is an alias for '{_FORMAT_ALIASES['human']}', so a "
+            "caller can request a reviewer-readable report from every "
+            "scanner without knowing each tool's format names."
         ),
     )
     p.add_argument(
         "--source-dir",
-        default=os.environ.get("GITLEAKS_SOURCE_DIR", "."),
+        default=os.environ.get("SCANNER_SOURCE_DIR", "."),
         help=(
             "Path to scan (default %(default)s). Set to a subdirectory of the "
             "checkout to restrict the scan to that subtree; gitleaks's "
@@ -562,7 +570,11 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha_load_github_event()
+        # Only 'changed' mode derives a git range from the event, so 'all'
+        # mode is handed no payload at all rather than one it ignores:
+        # loading it unconditionally would make a scheduled or dispatch
+        # run fail on a payload it was never going to read.
+        event = {} if args.scan_mode == "all" else gha_load_github_event()
         log_opts = _determine_log_opts(
             scan_mode=args.scan_mode,
             event_name=os.environ.get("GITHUB_EVENT_NAME", ""),

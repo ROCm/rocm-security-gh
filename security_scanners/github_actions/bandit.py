@@ -16,8 +16,10 @@ Exit codes:
 * `2` - input error: scan path missing, `bandit.yaml` missing,
   `GITHUB_EVENT_PATH` malformed, or bandit itself errored.
 
-Inputs come from CLI flags or matching `BANDIT_*` env vars set by the
-workflow.
+Inputs come from CLI flags or matching `SCANNER_*` env vars set by
+`security-baseline.yml`. That prefix is shared by every scanner, so one
+workflow step body drives all of them; each script ignores the variables
+that don't apply to it.
 """
 
 import argparse
@@ -51,10 +53,11 @@ log = logging.getLogger(__name__)
 
 
 # Keep in sync with the `report_formats` input in
-# `.github/workflows/bandit.yml`. Every one of bandit's format names is
-# also the right file extension for what it writes, so the report path
-# is derived from the format name; scanners where that isn't true (e.g.
-# gitleaks' `junit`, which writes XML) need an explicit mapping instead.
+# `.github/workflows/security-baseline.yml`. Every one of bandit's format
+# names is also the right file extension for what it writes, so the
+# report path is derived from the format name; scanners where that isn't
+# true (e.g. gitleaks' `junit`, which writes XML) need an explicit
+# mapping instead.
 _SUPPORTED_FORMATS: tuple[str, ...] = (
     "sarif",
     "json",
@@ -64,6 +67,10 @@ _SUPPORTED_FORMATS: tuple[str, ...] = (
     "yaml",
     "txt",
 )
+# Tool-independent aliases, so a caller can ask every scanner for "the
+# report a reviewer reads" without knowing that bandit spells it 'txt',
+# gitleaks 'csv', zizmor 'plain' and trivy 'table'.
+_FORMAT_ALIASES: dict[str, str] = {"human": "txt"}
 _BANDIT_VERSION = "1.9.4"
 _BANDIT_EXTRAS = "sarif"
 # PyPI sdist filenames are always version-qualified, unlike some other
@@ -237,14 +244,15 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     targets: list[_ReportTarget] = []
     seen: set[str] = set()
     for raw_fmt in raw.split(","):
-        fmt = raw_fmt.strip()
+        fmt = _FORMAT_ALIASES.get(raw_fmt.strip(), raw_fmt.strip())
         if not fmt or fmt in seen:
             continue
         seen.add(fmt)
         if fmt not in _SUPPORTED_FORMATS:
             raise ValueError(
                 f"Invalid report_formats entry '{fmt}' "
-                f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
+                f"(expected one of: "
+                f"{', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"bandit-report.{fmt}")))
     if not targets:
@@ -567,7 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--scan-mode",
-        default=os.environ.get("BANDIT_SCAN_MODE", "changed"),
+        default=os.environ.get("SCANNER_SCAN_MODE", "changed"),
         choices=("changed", "all"),
         help=(
             "'changed' (default) scans only Python source files modified "
@@ -580,15 +588,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--report-formats",
-        default=os.environ.get("BANDIT_REPORT_FORMATS", "sarif"),
+        default=os.environ.get("SCANNER_REPORT_FORMATS", "sarif"),
         help=(
-            "Comma-separated list of bandit report formats. Allowed values: "
-            f"{', '.join(sorted(_SUPPORTED_FORMATS))}."
+            "Comma-separated list of bandit report formats. Allowed "
+            f"values: {', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))}. "
+            f"'human' is an alias for '{_FORMAT_ALIASES['human']}', so a "
+            "caller can request a reviewer-readable report from every "
+            "scanner without knowing each tool's format names."
         ),
     )
     p.add_argument(
         "--source-dir",
-        default=os.environ.get("BANDIT_SOURCE_DIR", "."),
+        default=os.environ.get("SCANNER_SOURCE_DIR", "."),
         help=(
             "Path to scan (default %(default)s). Set to a subdirectory of "
             "the checkout to restrict the scan to that subtree; the "
@@ -598,7 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--checkout-root",
-        default=os.environ.get("BANDIT_CHECKOUT_ROOT", "."),
+        default=os.environ.get("SCANNER_CHECKOUT_ROOT", "."),
         help=(
             "Git checkout root of the repository being scanned (default "
             "%(default)s). Used to run `git fetch`/`git diff` and to "
@@ -611,7 +622,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--severity-threshold",
         default=os.environ.get(
-            "BANDIT_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD
+            "SCANNER_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD
         ),
         choices=_SEVERITY_CHOICES,
         help=(
