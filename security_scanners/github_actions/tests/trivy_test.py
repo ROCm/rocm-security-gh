@@ -100,6 +100,74 @@ class MainTest(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class SeverityGateTest(unittest.TestCase):
+    """Tests for the severity threshold that decides pass (0) vs fail (1)."""
+
+    def _main_with_counts(self, counts: dict[str, int], threshold: str) -> int:
+        """Run main() over a scan that reported `counts`, and return its exit code."""
+        with (
+            mock.patch("trivy.gha_append_step_summary"),
+            mock.patch("trivy.gha_set_output"),
+            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+            mock.patch("trivy._run_trivy", return_value=counts),
+        ):
+            return main(
+                [
+                    "--scan-mode",
+                    "all",
+                    "--source-dir",
+                    ".",
+                    "--severity-threshold",
+                    threshold,
+                ]
+            )
+
+    def test_threshold_decides_the_exit_code(self):
+        # The gate is inclusive: a finding *at* the threshold fails the
+        # job, anything strictly below it passes while still being
+        # reported. Each threshold is checked at its own boundary, since
+        # an off-by-one in _SEVERITY_ORDER slicing would either let
+        # CRITICAL findings through or fail every job that has a LOW note.
+        cases = [
+            ("critical", {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 1}, 1),
+            ("critical", {"LOW": 3, "MEDIUM": 2, "HIGH": 9, "CRITICAL": 0}, 0),
+            ("high", {"LOW": 0, "MEDIUM": 0, "HIGH": 1, "CRITICAL": 0}, 1),
+            ("high", {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 1}, 1),
+            ("high", {"LOW": 7, "MEDIUM": 4, "HIGH": 0, "CRITICAL": 0}, 0),
+            ("medium", {"LOW": 0, "MEDIUM": 1, "HIGH": 0, "CRITICAL": 0}, 1),
+            ("medium", {"LOW": 7, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}, 0),
+            ("low", {"LOW": 1, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}, 1),
+            ("low", {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}, 0),
+        ]
+        for threshold, counts, expected in cases:
+            with self.subTest(threshold=threshold, counts=counts):
+                self.assertEqual(self._main_with_counts(counts, threshold), expected)
+
+    def test_clean_scan_passes(self):
+        counts = {sev: 0 for sev in _SEVERITY_ORDER}
+        self.assertEqual(self._main_with_counts(counts, "high"), 0)
+
+    def test_severity_trivy_does_not_grade_never_fails_the_job(self):
+        # _tally_findings_by_severity passes through any severity string
+        # trivy emits, including one this script doesn't rank (e.g.
+        # UNKNOWN on an advisory with no CVSS data). Such a finding is
+        # logged but must not be silently treated as failing: only the
+        # ranked severities feed the gate.
+        counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0, "UNKNOWN": 3}
+        self.assertEqual(self._main_with_counts(counts, "high"), 0)
+
+    def test_all_mode_never_touches_the_github_event(self):
+        # 'all' mode derives no diff range, so it must not depend on a
+        # payload: the weekly scan runs on `schedule`, whose payload this
+        # script has no reason to parse.
+        with mock.patch("trivy.gha_load_github_event") as load_event:
+            self.assertEqual(
+                self._main_with_counts({sev: 0 for sev in _SEVERITY_ORDER}, "high"), 0
+            )
+        load_event.assert_not_called()
+
+
 class ParseReportFormatsTest(unittest.TestCase):
     """Tests for `_parse_report_formats`."""
 

@@ -644,20 +644,22 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha_load_github_event()
+        # Only 'changed' mode needs the event payload, to work out the
+        # diff range. Loading it unconditionally would make 'all' mode
+        # fail on events that have no payload we can parse, even though
+        # it never looks at one.
+        if args.scan_mode == "all":
+            files: list[Path] | None = None
+        else:
+            files = _determine_changed_audited_files(
+                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+                event=gha_load_github_event(),
+                scan_path=source_dir,
+                checkout_root=checkout_root,
+            )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
         return 2
-
-    if args.scan_mode == "all":
-        files: list[Path] | None = None
-    else:
-        files = _determine_changed_audited_files(
-            event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-            event=event,
-            scan_path=source_dir,
-            checkout_root=checkout_root,
-        )
 
     if files is None:
         log.info(
