@@ -53,6 +53,16 @@ SCANNERS: tuple[ScannerSpec, ...] = (
         module="security_scanners.github_actions.zizmor",
         timeout_minutes=20,
     ),
+    ScannerSpec(
+        name="bandit",
+        module="security_scanners.github_actions.bandit",
+        timeout_minutes=20,
+    ),
+    ScannerSpec(
+        name="trivy",
+        module="security_scanners.github_actions.trivy",
+        timeout_minutes=20,
+    ),
 )
 
 

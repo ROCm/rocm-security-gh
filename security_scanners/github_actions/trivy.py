@@ -25,10 +25,13 @@ Exit codes:
 * `2` - input error: scan path missing, `trivy.yaml` missing,
   `GITHUB_EVENT_PATH` malformed, or trivy itself errored.
 
-Inputs come from CLI flags or matching `TRIVY_*` env vars set by the
-workflow. All `TRIVY_*` vars are stripped from the trivy subprocess
-environment so our workflow inputs don't double-apply via trivy's own
-env-driven CLI (e.g. `TRIVY_SEVERITY`, `TRIVY_SCANNERS`).
+Inputs come from CLI flags or matching `SCANNER_*` env vars set by
+`security-baseline.yml`. That prefix is shared by every scanner, so one
+workflow step body drives all of them; each script ignores the variables
+that don't apply to it. Any ambient `TRIVY_*` vars are stripped from the
+trivy subprocess environment, so nothing in the runner's environment can
+override the flags this script passes via trivy's own env-driven CLI
+(e.g. `TRIVY_SEVERITY`, `TRIVY_SCANNERS`).
 """
 
 import argparse
@@ -60,7 +63,7 @@ log = logging.getLogger(__name__)
 
 
 # Keep in sync with the `report_formats` input in
-# `.github/workflows/trivy.yml`.
+# `.github/workflows/security-baseline.yml`.
 _SUPPORTED_FORMATS: dict[str, str] = {
     "sarif": "sarif",
     "json": "json",
@@ -69,6 +72,10 @@ _SUPPORTED_FORMATS: dict[str, str] = {
     "spdx-json": "spdx.json",
     "github": "github.json",
 }
+# Tool-independent aliases, so a caller can ask every scanner for "the
+# report a reviewer reads" without knowing that trivy spells it 'table',
+# gitleaks 'csv', zizmor 'plain' and bandit 'txt'.
+_FORMAT_ALIASES: dict[str, str] = {"human": "table"}
 _TRIVY_VERSION = "0.70.0"
 _TRIVY_TARBALL_FILENAME = f"trivy_{_TRIVY_VERSION}_Linux-64bit.tar.gz"
 _TRIVY_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_TRIVY_TARBALL_FILENAME}"
@@ -218,12 +225,13 @@ def get_trivy_binary() -> Path:
 
 
 def _trivy_subprocess_env() -> dict[str, str]:
-    """Return a subprocess env with our `TRIVY_*` workflow vars stripped.
+    """Return a subprocess env with any ambient `TRIVY_*` vars stripped.
 
     Trivy natively reads `TRIVY_*` env vars as defaults for its own CLI
-    flags (e.g. `TRIVY_SEVERITY`, `TRIVY_SCANNERS`), so leaving our
-    workflow inputs in its env risks double-application or silent
-    overrides. We always pass the canonical flags explicitly.
+    flags (e.g. `TRIVY_SEVERITY`, `TRIVY_SCANNERS`), so anything set in
+    the runner's environment could silently override the flags this
+    script passes -- which are org policy, not suggestions. Our own
+    inputs arrive under `SCANNER_*` and so survive this stripping.
     """
     env = dict(os.environ)
     for key in list(env.keys()):
@@ -237,7 +245,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     targets: list[_ReportTarget] = []
     seen: set[str] = set()
     for raw_fmt in raw.split(","):
-        fmt = raw_fmt.strip()
+        fmt = _FORMAT_ALIASES.get(raw_fmt.strip(), raw_fmt.strip())
         if not fmt or fmt in seen:
             continue
         seen.add(fmt)
@@ -245,7 +253,8 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
         if ext is None:
             raise ValueError(
                 f"Invalid report_formats entry '{fmt}' "
-                f"(expected one of: {', '.join(sorted(_SUPPORTED_FORMATS))})"
+                f"(expected one of: "
+                f"{', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))})"
             )
         targets.append(_ReportTarget(fmt=fmt, path=Path(f"trivy-report.{ext}")))
     if not targets:
@@ -549,7 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--scan-mode",
-        default=os.environ.get("TRIVY_SCAN_MODE", "changed"),
+        default=os.environ.get("SCANNER_SCAN_MODE", "changed"),
         choices=("changed", "all"),
         help=(
             "'changed' (default) short-circuits with a no-op when no "
@@ -563,15 +572,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--report-formats",
-        default=os.environ.get("TRIVY_REPORT_FORMATS", "sarif"),
+        default=os.environ.get("SCANNER_REPORT_FORMATS", "sarif"),
         help=(
-            "Comma-separated list of trivy report formats. Allowed values: "
-            f"{', '.join(sorted(_SUPPORTED_FORMATS))}."
+            "Comma-separated list of trivy report formats. Allowed "
+            f"values: {', '.join(sorted({*_SUPPORTED_FORMATS, *_FORMAT_ALIASES}))}. "
+            f"'human' is an alias for '{_FORMAT_ALIASES['human']}', so a "
+            "caller can request a reviewer-readable report from every "
+            "scanner without knowing each tool's format names."
         ),
     )
     p.add_argument(
         "--scanners",
-        default=os.environ.get("TRIVY_SCANNERS", _DEFAULT_SCANNERS),
+        default=os.environ.get("SCANNER_TRIVY_SCANNERS", _DEFAULT_SCANNERS),
         help=(
             "Comma-separated list of trivy scanners to enable. Allowed "
             f"values: {', '.join(_SUPPORTED_SCANNERS)}. Default "
@@ -582,7 +594,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--source-dir",
-        default=os.environ.get("TRIVY_SOURCE_DIR", "."),
+        default=os.environ.get("SCANNER_SOURCE_DIR", "."),
         help=(
             "Path to scan (default %(default)s). Set to a subdirectory of "
             "the checkout to restrict the scan to that subtree; the "
@@ -593,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--checkout-root",
-        default=os.environ.get("TRIVY_CHECKOUT_ROOT", "."),
+        default=os.environ.get("SCANNER_CHECKOUT_ROOT", "."),
         help=(
             "Git checkout root of the repository being scanned (default "
             "%(default)s). Used to run `git fetch`/`git diff` and to "
@@ -605,7 +617,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--severity-threshold",
-        default=os.environ.get("TRIVY_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD),
+        default=os.environ.get(
+            "SCANNER_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD
+        ),
         choices=_SEVERITY_CHOICES,
         help=(
             "Minimum trivy severity that fails the job. Trivy reports "
