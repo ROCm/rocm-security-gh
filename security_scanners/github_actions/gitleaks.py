@@ -10,8 +10,8 @@ Exit codes:
 * `2` - input error: scan path missing, `gitleaks.toml` missing,
   `GITHUB_EVENT_PATH` malformed, or gitleaks itself errored.
 
-Inputs come from CLI flags or matching `GITLEAKS_*` env vars set by the
-workflow.
+Inputs come from CLI flags or the matching `SCANNER_*` env vars set by
+`.github/workflows/security-baseline.yml`.
 """
 
 import argparse
@@ -570,7 +570,11 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha_load_github_event()
+        # Only 'changed' mode derives a git range from the event, so 'all'
+        # mode is handed no payload at all rather than one it ignores:
+        # loading it unconditionally would make a scheduled or dispatch
+        # run fail on a payload it was never going to read.
+        event = {} if args.scan_mode == "all" else gha_load_github_event()
         log_opts = _determine_log_opts(
             scan_mode=args.scan_mode,
             event_name=os.environ.get("GITHUB_EVENT_NAME", ""),

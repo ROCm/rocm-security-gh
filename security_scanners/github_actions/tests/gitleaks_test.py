@@ -73,6 +73,39 @@ class MainTest(unittest.TestCase):
             self.assertEqual(outputs.get("sarif_path", ""), "")
 
 
+class LeakGateTest(unittest.TestCase):
+    """Tests for the gate that decides pass (0) vs fail (1).
+
+    Gitleaks has no severity scale, so unlike the other scanners there is
+    no threshold to tune: any leak fails the job.
+    """
+
+    def _main_with_leaks(self, leaks_found: bool) -> int:
+        """Run main() over a scan that did (or didn't) find leaks."""
+        with (
+            mock.patch("gitleaks.gha_append_step_summary"),
+            mock.patch("gitleaks.gha_set_output"),
+            mock.patch("gitleaks._resolve_config_path", return_value="gitleaks.toml"),
+            mock.patch("gitleaks.get_gitleaks_binary", return_value=Path("gitleaks")),
+            mock.patch("gitleaks._run_gitleaks", return_value=leaks_found),
+        ):
+            return main(["--scan-mode", "all", "--source-dir", "."])
+
+    def test_any_leak_fails_the_job(self):
+        self.assertEqual(self._main_with_leaks(True), 1)
+
+    def test_clean_scan_passes(self):
+        self.assertEqual(self._main_with_leaks(False), 0)
+
+    def test_all_mode_never_touches_the_github_event(self):
+        # 'all' mode scans the full history and derives no git range, so
+        # it must not depend on a payload: the weekly scan runs on
+        # `schedule`, whose payload this script has no reason to parse.
+        with mock.patch("gitleaks.gha_load_github_event") as load_event:
+            self.assertEqual(self._main_with_leaks(False), 0)
+        load_event.assert_not_called()
+
+
 class ParseReportFormatsTest(unittest.TestCase):
     """Tests for `_parse_report_formats`."""
 

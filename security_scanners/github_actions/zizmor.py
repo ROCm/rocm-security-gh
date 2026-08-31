@@ -16,8 +16,8 @@ Exit codes:
 * `2` - input error: scan path missing, `zizmor.yml` missing,
   `GITHUB_EVENT_PATH` malformed, or zizmor itself errored.
 
-Inputs come from CLI flags or matching `ZIZMOR_*` env vars set by the
-workflow.
+Inputs come from CLI flags or the matching `SCANNER_*` env vars set by
+`.github/workflows/security-baseline.yml`.
 """
 
 import argparse
@@ -492,11 +492,25 @@ def _enrich_sarif_with_security_severity(sarif_path: Path) -> None:
             enriched += 1
 
     if enriched == 0:
-        log.debug(
-            "SARIF severity enrichment: nothing to add (%d unknown) in %s",
-            unknown,
-            sarif_path,
-        )
+        if unknown:
+            # Loud rather than silent: zizmor's SARIF output is the only
+            # source of `properties["zizmor/severity"]`, so results
+            # arriving without one mean the pinned release changed shape
+            # and every finding is now tiered by `level` alone.
+            log.warning(
+                "SARIF severity enrichment added nothing: %d result(s) in %s carry "
+                "no recognised properties['zizmor/severity']. zizmor %s emits it; a "
+                "release that renames or drops the field leaves the Security tab "
+                "tiering findings by 'level' alone.",
+                unknown,
+                sarif_path,
+                _ZIZMOR_VERSION,
+            )
+        else:
+            log.debug(
+                "SARIF severity enrichment: nothing to add in %s",
+                sarif_path,
+            )
         return
 
     try:
@@ -669,20 +683,22 @@ def main(argv: list[str]) -> int:
 
     try:
         config_path = _resolve_config_path()
-        event = gha_load_github_event()
+        # Only 'changed' mode needs the event payload, to work out the
+        # diff range. Loading it unconditionally would make 'all' mode
+        # fail on events that have no payload we can parse, even though
+        # it never looks at one.
+        if args.scan_mode == "all":
+            files: list[Path] | None = None
+        else:
+            files = _determine_changed_audited_files(
+                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+                event=gha_load_github_event(),
+                scan_path=source_dir,
+                checkout_root=checkout_root,
+            )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
         return 2
-
-    if args.scan_mode == "all":
-        files: list[Path] | None = None
-    else:
-        files = _determine_changed_audited_files(
-            event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-            event=event,
-            scan_path=source_dir,
-            checkout_root=checkout_root,
-        )
 
     if files is None:
         log.info(

@@ -68,6 +68,82 @@ class MainTest(unittest.TestCase):
             self.assertEqual(outputs.get("sarif_path", ""), "")
 
 
+class SeverityGateTest(unittest.TestCase):
+    """Tests for the severity threshold that decides pass (0) vs fail (1)."""
+
+    def _main_with_counts(self, counts: dict[str, int], threshold: str) -> int:
+        """Run main() over a scan that reported `counts`, and return its exit code."""
+        with (
+            mock.patch("zizmor.gha_append_step_summary"),
+            mock.patch("zizmor.gha_set_output"),
+            mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
+            mock.patch("zizmor.get_zizmor_binary", return_value=Path("zizmor")),
+            mock.patch("zizmor._run_zizmor", return_value=counts),
+        ):
+            return main(
+                [
+                    "--scan-mode",
+                    "all",
+                    "--source-dir",
+                    ".",
+                    "--severity-threshold",
+                    threshold,
+                ]
+            )
+
+    def test_threshold_decides_the_exit_code(self):
+        # The gate is inclusive: a finding *at* the threshold fails the
+        # job, anything strictly below it passes while still being
+        # reported. Each threshold is checked at its own boundary, since
+        # an off-by-one in _SEVERITY_ORDER slicing would either let HIGH
+        # findings through or fail every job that has an INFORMATIONAL
+        # note.
+        cases = [
+            ("high", {"INFORMATIONAL": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 1}, 1),
+            ("high", {"INFORMATIONAL": 9, "LOW": 7, "MEDIUM": 4, "HIGH": 0}, 0),
+            ("medium", {"INFORMATIONAL": 0, "LOW": 0, "MEDIUM": 1, "HIGH": 0}, 1),
+            ("medium", {"INFORMATIONAL": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 1}, 1),
+            ("medium", {"INFORMATIONAL": 9, "LOW": 7, "MEDIUM": 0, "HIGH": 0}, 0),
+            ("low", {"INFORMATIONAL": 0, "LOW": 1, "MEDIUM": 0, "HIGH": 0}, 1),
+            ("low", {"INFORMATIONAL": 9, "LOW": 0, "MEDIUM": 0, "HIGH": 0}, 0),
+            (
+                "informational",
+                {"INFORMATIONAL": 1, "LOW": 0, "MEDIUM": 0, "HIGH": 0},
+                1,
+            ),
+            (
+                "informational",
+                {"INFORMATIONAL": 0, "LOW": 0, "MEDIUM": 0, "HIGH": 0},
+                0,
+            ),
+        ]
+        for threshold, counts, expected in cases:
+            with self.subTest(threshold=threshold, counts=counts):
+                self.assertEqual(self._main_with_counts(counts, threshold), expected)
+
+    def test_clean_scan_passes(self):
+        counts = {sev: 0 for sev in _SEVERITY_ORDER}
+        self.assertEqual(self._main_with_counts(counts, "high"), 0)
+
+    def test_severity_zizmor_does_not_grade_never_fails_the_job(self):
+        # The tally helpers pass through any severity string zizmor
+        # emits, including one this script doesn't rank. Such a finding
+        # is logged but must not be silently treated as failing: only the
+        # ranked severities feed the gate.
+        counts = {sev: 0 for sev in _SEVERITY_ORDER} | {"UNKNOWN": 3}
+        self.assertEqual(self._main_with_counts(counts, "high"), 0)
+
+    def test_all_mode_never_touches_the_github_event(self):
+        # 'all' mode derives no diff range, so it must not depend on a
+        # payload: the weekly scan runs on `schedule`, whose payload this
+        # script has no reason to parse.
+        with mock.patch("zizmor.gha_load_github_event") as load_event:
+            self.assertEqual(
+                self._main_with_counts({sev: 0 for sev in _SEVERITY_ORDER}, "high"), 0
+            )
+        load_event.assert_not_called()
+
+
 class ParseReportFormatsTest(unittest.TestCase):
     """Tests for `_parse_report_formats`."""
 
@@ -300,6 +376,25 @@ class EnrichSarifSeverityTest(unittest.TestCase):
         data = json.loads(path.read_text(encoding="utf-8"))
         props = data["runs"][0]["results"][0]["properties"]
         self.assertNotIn("security-severity", props)
+
+    def test_findings_without_a_severity_property_are_warned_about(self):
+        # A pinned zizmor release that renames or drops
+        # properties['zizmor/severity'] would otherwise degrade in
+        # silence, leaving the Security tab to tier every finding by
+        # 'level' alone.
+        path = self._write_sarif(
+            {"runs": [{"results": [{"ruleId": "template-injection"}]}]}
+        )
+        with self.assertLogs("zizmor", level="WARNING") as logs:
+            _enrich_sarif_with_security_severity(path)
+        self.assertIn("zizmor/severity", "\n".join(logs.output))
+
+    def test_sarif_without_results_does_not_warn(self):
+        # No results at all is a clean scan, not a broken payload.
+        path = self._write_sarif({"runs": [{"results": []}]})
+        with mock.patch("zizmor.log") as logger:
+            _enrich_sarif_with_security_severity(path)
+        logger.warning.assert_not_called()
 
 
 class TallyFindingsBySeverityTest(unittest.TestCase):
