@@ -21,13 +21,37 @@ on:
 
 jobs:
   trivy:
-    # `trivy.yml` declares no `permissions:` of its own, so this job's
-    # grant flows straight through to its steps: `contents: read` for the
-    # checkout steps, `security-events: write` for the SARIF upload.
     permissions:
       contents: read
       security-events: write
     uses: ./.github/workflows/trivy.yml
+    with:
+      scan_mode: all
+      report_formats: sarif
+  zizmor:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/trivy.yml
+    uses: ./.github/workflows/zizmor.yml
+    with:
+      scan_mode: all
+      report_formats: sarif
+
+  gitleaks:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/gitleaks.yml
+    with:
+      scan_mode: all
+      report_formats: sarif
+
+  bandit:
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/bandit.yml
     with:
       scan_mode: all
       report_formats: sarif

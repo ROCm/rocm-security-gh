@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   # Scan for dependency/IaC changes introduced by this PR (`scan_mode:
   # changed`, the reusable workflow's default): short-circuits with a
@@ -25,3 +29,28 @@ jobs:
     uses: ./.github/workflows/trivy.yml
     with:
       report_formats: table
+  # Audit workflow/action/dependabot files changed by this PR
+  # (`scan_mode: changed`, the reusable workflow's default). Plain-text
+  # report is uploaded as a build artifact and printed to the job
+  # summary so reviewers can browse findings directly from the PR's
+  # Checks tab.
+  zizmor:
+    uses: ./.github/workflows/zizmor.yml
+    with:
+      report_formats: plain
+  # Scan commits introduced by this PR (`scan_mode: changed`, the
+  # reusable workflow's default). CSV report is uploaded as a build
+  # artifact and printed to the job summary so reviewers can browse
+  # findings directly from the PR's Checks tab.
+  gitleaks:
+    uses: ./.github/workflows/gitleaks.yml
+    with:
+      report_formats: csv
+  # Scan Python files changed by this PR (`scan_mode: changed`, the
+  # reusable workflow's default). Plain-text report is uploaded as a
+  # build artifact and printed to the job summary so reviewers can
+  # browse findings directly from the PR's Checks tab.
+  bandit:
+    uses: ./.github/workflows/bandit.yml
+    with:
+      report_formats: txt
