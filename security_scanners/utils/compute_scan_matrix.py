@@ -24,7 +24,7 @@ from security_scanners.utils.github_actions_api import gha_set_output
 
 @dataclass(frozen=True)
 class ScannerSpec:
-    """A scanner the security-scan workflow knows how to run.
+    """A scanner the security baseline workflow knows how to run.
 
     Attributes:
         name: Caller-facing name, also the SARIF category and the stem of
