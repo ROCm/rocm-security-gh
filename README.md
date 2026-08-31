@@ -79,6 +79,28 @@ confidence.
 - Also accepts `severity_threshold` (`high` by default) to set which
   severity fails the job.
 
+### Trivy
+
+[trivy](https://trivy.dev/) scans a filesystem for known vulnerabilities
+in declared dependencies and for infrastructure misconfigurations --
+vulnerable package versions across language and OS manifests, plus
+insecure Dockerfile, Kubernetes, Terraform and Helm settings -- matching
+against its own regularly updated vulnerability and policy databases.
+
+- Workflow: `.github/workflows/trivy.yml`
+- `report_formats`: `sarif` (default), `json`, `table`, `cyclonedx`,
+  `spdx-json`, `github`
+- `scan_mode: changed` is a no-op unless the calling event touched a
+  dependency manifest, IaC or container file, and otherwise scans all of
+  `scan_path`: trivy needs the whole subtree to resolve transitive
+  dependencies and cross-file IaC references, so unlike bandit and zizmor
+  it is never handed an individual file list.
+- Also accepts `severity_threshold` (`high` by default) to set which
+  severity fails the job, and `scanners` (`misconfig,vuln` by default) to
+  pick which trivy scanners run. `secret` is left out of that default
+  because gitleaks already covers secret detection; enable it only if you
+  want both running side by side.
+
 ## Consuming these workflows from another repo
 
 ### Split scanning strategy
@@ -87,11 +109,11 @@ PRs (including fork PRs) and trusted/scheduled runs should request
 different things:
 
 - **PR-time scans** should request a human-readable format (`plain` for
-  zizmor, `csv` for gitleaks, `txt` for bandit) and grant only
-  `contents: read`. Findings are uploaded as a build artifact and printed
-  to the job summary for a human to review; nothing touches the Security
-  tab, so fork PRs (which never receive elevated tokens) work identically
-  to same-repo PRs.
+  zizmor, `csv` for gitleaks, `txt` for bandit, `table` for trivy) and
+  grant only `contents: read`. Findings are uploaded as a build artifact
+  and printed to the job summary for a human to review; nothing touches
+  the Security tab, so fork PRs (which never receive elevated tokens)
+  work identically to same-repo PRs.
 - **Trusted scans** (`schedule`, `workflow_dispatch`, `push` to the default
   branch) should request `report_formats: sarif` and grant both
   `contents: read` and `security-events: write` so findings land in
@@ -120,6 +142,10 @@ different things:
        uses: ROCm/rocm-security-gh/.github/workflows/bandit.yml@main
        with:
          report_formats: txt
+     trivy:
+       uses: ROCm/rocm-security-gh/.github/workflows/trivy.yml@main
+       with:
+         report_formats: table
    ```
 
 1. Add a scheduled workflow that uploads to the Security tab. Grant
@@ -156,6 +182,14 @@ different things:
          contents: read
          security-events: write
        uses: ROCm/rocm-security-gh/.github/workflows/bandit.yml@main
+       with:
+         scan_mode: all
+         report_formats: sarif
+     trivy:
+       permissions:
+         contents: read
+         security-events: write
+       uses: ROCm/rocm-security-gh/.github/workflows/trivy.yml@main
        with:
          scan_mode: all
          report_formats: sarif
