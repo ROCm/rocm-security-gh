@@ -5,20 +5,20 @@ This repository serves as the central source for ROCm security and governance au
 The repository includes:
 
 - Reusable GitHub Actions workflows
-- Security scanning integrations and configurations (e.g., CodeQL, Gitleaks, Trivy, Zizmor)
+- Security scanning integrations and configurations (e.g., Bandit, CodeQL, Gitleaks, Trivy, Zizmor)
 - Best practices for secure software development and repository management
 
 All ROCm repository owners and maintainers should adopt these workflows and security controls to improve security posture, reduce risk, and maintain consistent governance across the ROCm ecosystem.
 
 ## Binary integrity
 
-Scanner scripts that download a pinned release tarball at run time (e.g.
-`gitleaks.py`, `zizmor.py`, `trivy.py`) verify it against the repo-root
-`checksums.sha256` file, via the shared
+Scanner scripts that download a pinned artifact at run time (e.g.
+`gitleaks.py`, `zizmor.py`, `trivy.py`, `bandit.py`) verify it against the
+repo-root `checksums.sha256` file, via the shared
 `security_scanners/utils/binary_checksums.py` helper,
 before extracting or executing anything. A digest mismatch (or a
 missing/malformed checksums file) makes the scan job fail closed rather
-than run an unverified binary.
+than run an unverified artifact.
 
 ## Scanners
 
@@ -62,6 +62,23 @@ tree.
 - `scan_mode: changed` scans only the commits the calling event
   introduced, and requires a `pull_request` or `push` payload.
 
+### Bandit
+
+[bandit](https://bandit.readthedocs.io/) is a static analysis tool for
+Python. It walks each source file's AST and flags insecure constructs --
+`subprocess` with `shell=True`, hardcoded passwords, weak hashes,
+`yaml.load` without a safe loader, disabled TLS verification, `assert`
+used as a runtime check -- grading each finding by severity and
+confidence.
+
+- Workflow: `.github/workflows/bandit.yml`
+- `report_formats`: `sarif` (default), `json`, `csv`, `html`, `txt`,
+  `xml`, `yaml`
+- `scan_mode: changed` scans only the Python files the calling event
+  touched; non-Python files are skipped in either mode.
+- Also accepts `severity_threshold` (`high` by default) to set which
+  severity fails the job.
+
 ## Consuming these workflows from another repo
 
 ### Split scanning strategy
@@ -70,10 +87,11 @@ PRs (including fork PRs) and trusted/scheduled runs should request
 different things:
 
 - **PR-time scans** should request a human-readable format (`plain` for
-  zizmor, `csv` for gitleaks) and grant only `contents: read`. Findings
-  are uploaded as a build artifact and printed to the job summary for a
-  human to review; nothing touches the Security tab, so fork PRs (which
-  never receive elevated tokens) work identically to same-repo PRs.
+  zizmor, `csv` for gitleaks, `txt` for bandit) and grant only
+  `contents: read`. Findings are uploaded as a build artifact and printed
+  to the job summary for a human to review; nothing touches the Security
+  tab, so fork PRs (which never receive elevated tokens) work identically
+  to same-repo PRs.
 - **Trusted scans** (`schedule`, `workflow_dispatch`, `push` to the default
   branch) should request `report_formats: sarif` and grant both
   `contents: read` and `security-events: write` so findings land in
@@ -98,6 +116,10 @@ different things:
        uses: ROCm/rocm-security-gh/.github/workflows/gitleaks.yml@main
        with:
          report_formats: csv
+     bandit:
+       uses: ROCm/rocm-security-gh/.github/workflows/bandit.yml@main
+       with:
+         report_formats: txt
    ```
 
 1. Add a scheduled workflow that uploads to the Security tab. Grant
@@ -126,6 +148,14 @@ different things:
          contents: read
          security-events: write
        uses: ROCm/rocm-security-gh/.github/workflows/gitleaks.yml@main
+       with:
+         scan_mode: all
+         report_formats: sarif
+     bandit:
+       permissions:
+         contents: read
+         security-events: write
+       uses: ROCm/rocm-security-gh/.github/workflows/bandit.yml@main
        with:
          scan_mode: all
          report_formats: sarif

@@ -1,8 +1,9 @@
-# SHA-256 checksums for third-party scanner binaries downloaded at run
-# time (gitleaks, trivy, ...). One line per release: "<digest>  <filename>"
-# (sha256sum format). A mismatch means the binary is not used.
+# SHA-256 checksums for third-party scanner artifacts downloaded at run
+# time (gitleaks, trivy, zizmor, bandit, ...). One line per release:
+# "<digest>  <filename>" (sha256sum format). A mismatch means the
+# artifact is not used.
 #
-# Before adding an entry, verify the tarball against its own project's
+# Before adding an entry, verify the artifact against its own project's
 # published checksum/signature. Precede each entry with a comment linking
 # to where it was downloaded from, so the digest is traceable back to its
 # source. Remove entries no longer referenced.
@@ -12,3 +13,6 @@
 
 # Original source: https://github.com/zizmorcore/zizmor/releases/download/v1.24.1/zizmor-x86_64-unknown-linux-gnu.tar.gz
 a8000f3c683319a523d3b20df0e75457ba591f049cfcbfa98966631b56733c03  zizmor-x86_64-unknown-linux-gnu.tar.gz
+
+# Original source: https://files.pythonhosted.org/packages/aa/c3/0cb80dfe0f3076e5da7e4c5ad8e57bac6ac357ff4a6406205501cade4965/bandit-1.9.4.tar.gz
+b589e5de2afe70bd4d53fa0c1da6199f4085af666fde00e8a034f152a52cd628  bandit-1.9.4.tar.gz

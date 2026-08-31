@@ -15,6 +15,14 @@ on:
 permissions:
   contents: read
 
+# One scan per PR: pushing a new commit supersedes the previous scan, so
+# the in-flight one is cancelled rather than left to report on code that
+# no longer exists. Keyed on the PR number, so runs on other PRs are
+# never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   # Audit workflow/action/dependabot files changed by this PR
   # (`scan_mode: changed`, the reusable workflow's default). Plain-text
@@ -33,3 +41,18 @@ jobs:
     uses: ./.github/workflows/gitleaks.yml
     with:
       report_formats: csv
+  # Scan Python files changed by this PR (`scan_mode: changed`, the
+  # reusable workflow's default). Plain-text report is uploaded as a
+  # build artifact and printed to the job summary so reviewers can
+  # browse findings directly from the PR's Checks tab.
+  #
+  # Deliberately inherits `bandit.yml`'s default `severity_threshold:
+  # high`, matching zizmor: the gate blocks the PR on HIGH findings,
+  # while MEDIUM and LOW still show up in the report for a reviewer to
+  # judge. The weekly scan uses the same threshold and publishes SARIF,
+  # so a finding that doesn't block a PR still lands in the Security tab
+  # rather than disappearing.
+  bandit:
+    uses: ./.github/workflows/bandit.yml
+    with:
+      report_formats: txt
