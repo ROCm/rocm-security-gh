@@ -12,13 +12,8 @@ on:
   # Run every Saturday at 10:00 UTC.
   schedule:
     - cron: "0 10 * * 6"
-  # Allow re-running the weekly scan on demand, e.g. after tweaking a
-  # scanner's config or rotating its version pin, so the Security tab can
-  # be refreshed without an unrelated commit.
   workflow_dispatch:
 
-# Read-only by default, so a job added here later has to ask for more
-# rather than inherit the repository's default token scope.
 permissions:
   contents: read
 

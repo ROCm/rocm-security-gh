@@ -10,26 +10,17 @@ name: PR security scan
 
 on:
   pull_request:
-    # GitHub's defaults, spelled out: a scan is only meaningful when the
-    # PR appears or its head moves.
+    # Spelled out the default to avoid confusion.
     types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
 
-# A scan of a superseded commit tells reviewers nothing, so let a new push
-# cancel the run it replaces rather than queueing behind it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  # Every scanner, restricted to what this PR touched (`scan_mode:
-  # changed`, the default). Each one asks for its own reviewer-readable
-  # format via `human`, uploaded as a build artifact and printed to the
-  # job summary so reviewers can browse findings from the PR's Checks
-  # tab. Nothing reaches the Security tab, so fork PRs behave
-  # identically to same-repo PRs.
   security:
     uses: ./.github/workflows/security-baseline.yml
     with:
