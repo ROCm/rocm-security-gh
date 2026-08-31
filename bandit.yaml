@@ -1,0 +1,15 @@
+# bandit configuration for rocm-security-gh
+# Reference: https://bandit.readthedocs.io/en/latest/config.html
+#
+# Shared across every repo this config scans (this is the single
+# bandit.yaml used by the `bandit.yml` reusable workflow for all
+# callers, not just this repo). Add per-repo suppressions or tuning
+# here (e.g. `skips: [...]`) so they stay centrally reviewable.
+
+exclude_dirs:
+  - .git
+  - .venv
+  - venv
+  - build
+  - dist
+  - node_modules

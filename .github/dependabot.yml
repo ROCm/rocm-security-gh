@@ -7,6 +7,8 @@
 version: 2
 updates:
   - package-ecosystem: "github-actions"
+    # "/" covers .github/workflows; composite actions keep their own `uses:`
+    # pins, so .github/actions has to be listed separately to get bumped.
     directories:
       - "/"
       - "/.github/actions/*"
@@ -19,6 +21,12 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # No `pip` ecosystem on purpose: this config doubles as the baseline other
+  # ROCm repos copy, and auto-bumping Python dependencies is the wrong default
+  # for repos that pin them deliberately. Scanner artifacts are pinned by
+  # digest in checksums.sha256 and verified at run time, which Dependabot
+  # neither reads nor updates.
 
   # Hook revisions in .pre-commit-config.yaml.
   - package-ecosystem: "pre-commit"

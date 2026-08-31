@@ -5,20 +5,20 @@ This repository serves as the central source for ROCm security and governance au
 The repository includes:
 
 - Reusable GitHub Actions workflows
-- Security scanning integrations and configurations (e.g., CodeQL, Gitleaks, Trivy, Zizmor)
+- Security scanning integrations and configurations (e.g., Bandit, CodeQL, Gitleaks, Trivy, Zizmor)
 - Best practices for secure software development and repository management
 
 All ROCm repository owners and maintainers should adopt these workflows and security controls to improve security posture, reduce risk, and maintain consistent governance across the ROCm ecosystem.
 
 ## Binary integrity
 
-Scanner scripts that download a pinned release tarball at run time (e.g.
-`gitleaks.py`, `zizmor.py`, `trivy.py`) verify it against the repo-root
-`checksums.sha256` file, via the shared
+Scanner scripts that download a pinned artifact at run time (e.g.
+`gitleaks.py`, `zizmor.py`, `trivy.py`, `bandit.py`) verify it against the
+repo-root `checksums.sha256` file, via the shared
 `security_scanners/utils/binary_checksums.py` helper,
 before extracting or executing anything. A digest mismatch (or a
 missing/malformed checksums file) makes the scan job fail closed rather
-than run an unverified binary.
+than run an unverified artifact.
 
 ## Scanners
 
@@ -86,6 +86,43 @@ tree.
   introduced, and requires a `pull_request` or `push` payload.
 - Has no severity scale: every leak fails the job.
 
+### Bandit
+
+[bandit](https://bandit.readthedocs.io/) is a static analysis tool for
+Python. It walks each source file's AST and flags insecure constructs --
+`subprocess` with `shell=True`, hardcoded passwords, weak hashes,
+`yaml.load` without a safe loader, disabled TLS verification, `assert`
+used as a runtime check -- grading each finding by severity and
+confidence.
+
+- Check run: `bandit`
+- `report_formats`: `sarif` (default), `json`, `csv`, `html`, `txt`,
+  `xml`, `yaml`, and `human` (an alias for `txt`)
+- `scan_mode: changed` scans only the Python files the calling event
+  touched; non-Python files are skipped in either mode.
+- Fails on findings at or above HIGH severity; reports still carry every
+  finding.
+
+### Trivy
+
+[trivy](https://trivy.dev/) scans a filesystem for known vulnerabilities
+in declared dependencies and for infrastructure misconfigurations --
+vulnerable package versions across language and OS manifests, plus
+insecure Dockerfile, Kubernetes, Terraform and Helm settings -- matching
+against its own regularly updated vulnerability and policy databases.
+
+- Check run: `trivy`
+- `report_formats`: `sarif` (default), `json`, `table`, `cyclonedx`,
+  `spdx-json`, `github`, and `human` (an alias for `table`)
+- `scan_mode: changed` is a no-op unless the calling event touched a
+  dependency manifest, IaC or container file, and otherwise scans all of
+  `scan_path`: trivy needs the whole subtree to resolve transitive
+  dependencies and cross-file IaC references, so unlike bandit and zizmor
+  it is never handed an individual file list.
+- Fails on findings at or above HIGH severity; reports still carry every
+  finding. Runs trivy's `misconfig` and `vuln` scanners; `secret` is
+  deliberately left out because gitleaks already covers secret detection.
+
 ## Consuming these workflows from another repo
 
 ### Split scanning strategy
@@ -94,10 +131,12 @@ PRs (including fork PRs) and trusted/scheduled runs should request
 different things:
 
 - **PR-time scans** should request `report_formats: human` and grant only
-  `contents: read`. Findings are uploaded as a build artifact and printed
-  to the job summary for a human to review; nothing touches the Security
-  tab, so fork PRs (which never receive elevated tokens) work identically
-  to same-repo PRs.
+  `contents: read`. Each scanner resolves that to its own
+  reviewer-readable format, so there is nothing per-tool to remember.
+  Findings are uploaded as a build artifact and printed to the job
+  summary for a human to review; nothing touches the Security tab, so
+  fork PRs (which never receive elevated tokens) work identically to
+  same-repo PRs.
 - **Trusted scans** (`schedule`, `workflow_dispatch`, `push` to the default
   branch) should request `report_formats: sarif` and grant both
   `contents: read` and `security-events: write` so findings land in

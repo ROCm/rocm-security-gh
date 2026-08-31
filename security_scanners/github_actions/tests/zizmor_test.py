@@ -18,7 +18,6 @@ from zizmor import (
     _determine_changed_audited_files,
     _diff_range,
     _enrich_sarif_with_security_severity,
-    _GithubActionsApi,
     _is_audited_path,
     _parse_report_formats,
     _resolve_config_path,
@@ -32,13 +31,6 @@ from zizmor import (
 class MainTest(unittest.TestCase):
     """Tests for main()'s documented exit-code contract."""
 
-    def _stub_gha(self, set_output=None) -> _GithubActionsApi:
-        return _GithubActionsApi(
-            append_step_summary=lambda summary: None,
-            load_github_event=lambda: {},
-            set_output=set_output or (lambda outputs: None),
-        )
-
     def test_unexpected_scanner_exception_returns_2_without_raising(self):
         # get_zizmor_binary()/_run_zizmor() can fail with exception types
         # other than RuntimeError (e.g. OSError from a download/network
@@ -46,10 +38,9 @@ class MainTest(unittest.TestCase):
         # module's documented contract, not escape main() as an
         # unhandled exception.
         with (
-            mock.patch(
-                "zizmor.import_github_actions_api",
-                return_value=self._stub_gha(),
-            ),
+            mock.patch("zizmor.gha_load_github_event", return_value={}),
+            mock.patch("zizmor.gha_append_step_summary"),
+            mock.patch("zizmor.gha_set_output"),
             mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
             mock.patch("zizmor.get_zizmor_binary", side_effect=OSError("network down")),
         ):
@@ -61,12 +52,10 @@ class MainTest(unittest.TestCase):
         # step runs whenever `sarif_path != ''`, so reporting the path
         # ahead of (or despite) a failed run would make that step fire
         # against a missing file and mask the real failure.
-        set_output = mock.Mock()
         with (
-            mock.patch(
-                "zizmor.import_github_actions_api",
-                return_value=self._stub_gha(set_output=set_output),
-            ),
+            mock.patch("zizmor.gha_load_github_event", return_value={}),
+            mock.patch("zizmor.gha_append_step_summary"),
+            mock.patch("zizmor.gha_set_output") as set_output,
             mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
             mock.patch(
                 "zizmor.get_zizmor_binary",
