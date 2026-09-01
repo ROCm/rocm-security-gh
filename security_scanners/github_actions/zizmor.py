@@ -42,6 +42,10 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
+from security_scanners.utils.scanner_config import (
+    find_config_change,
+    resolve_scanner_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -71,6 +75,17 @@ _ZIZMOR_VERSION = "1.24.1"
 _ZIZMOR_TARBALL_FILENAME = "zizmor-x86_64-unknown-linux-gnu.tar.gz"
 _ZIZMOR_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_ZIZMOR_TARBALL_FILENAME}"
 _CONFIG_PATH = "zizmor.yml"
+# Where a scanned repository is allowed to keep its own config, in
+# zizmor's own discovery order: .github before the repository root, .yml
+# before .yaml (both spellings since v1.19.0). Passing --config disables
+# zizmor's discovery, so this order is what keeps a local `zizmor .` run
+# and CI reading the same file.
+_CONFIG_CANDIDATES: tuple[str, ...] = (
+    ".github/zizmor.yml",
+    ".github/zizmor.yaml",
+    "zizmor.yml",
+    "zizmor.yaml",
+)
 # Ascending severity order; threshold comparisons rely on it.
 _SEVERITY_ORDER: tuple[str, ...] = ("INFORMATIONAL", "LOW", "MEDIUM", "HIGH")
 _SEVERITY_CHOICES: tuple[str, ...] = tuple(s.lower() for s in _SEVERITY_ORDER)
@@ -211,18 +226,19 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     return targets
 
 
-def _resolve_config_path() -> str:
-    # Anchored on REPO_ROOT (this script's own checkout), not the cwd:
-    # when this workflow is called from another repo, the cwd holds
-    # *that* repo's checkout (the scan target), not rocm-security-gh's.
-    config_path = REPO_ROOT / _CONFIG_PATH
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"zizmor config not found at '{config_path}'. "
-            "Expected it alongside this script's rocm-security-gh checkout."
-        )
-    log.info("Using zizmor config: %s", config_path)
-    return str(config_path)
+def _resolve_config_path(checkout_root: Path) -> str:
+    # The fallback is anchored on REPO_ROOT (this script's own checkout),
+    # not the cwd: when this workflow is called from another repo, the cwd
+    # holds *that* repo's checkout (the scan target), not
+    # rocm-security-gh's.
+    return str(
+        resolve_scanner_config(
+            scanner="zizmor",
+            checkout_root=checkout_root,
+            candidates=_CONFIG_CANDIDATES,
+            fallback=REPO_ROOT / _CONFIG_PATH,
+        ).path
+    )
 
 
 def _event_str(event: Mapping[str, object], *keys: str) -> str:
@@ -327,7 +343,13 @@ def _determine_changed_audited_files(
                 "git",
                 "diff",
                 "--name-only",
-                "--diff-filter=ACMR",
+                # D is here for the config check below: deleting a config
+                # switches the whole repository back to the default one,
+                # which is as much a config change as editing it. Deleted
+                # workflow files reaching the filter is harmless, since
+                # the is_file() check below drops paths that no longer
+                # exist.
+                "--diff-filter=ACDMR",
                 f"{base_sha}..{head_sha}",
             ],
             cwd=checkout_root,
@@ -345,9 +367,19 @@ def _determine_changed_audited_files(
         )
         return None
 
+    changed = result.stdout.splitlines()
+    config_change = find_config_change(changed, filenames=_CONFIG_CANDIDATES)
+    if config_change is not None:
+        log.info(
+            "Changed config (%s) applies to every workflow, so this run "
+            "audits the whole tree instead of the changed files alone",
+            config_change,
+        )
+        return None
+
     scan_root = scan_path.resolve()
     files: list[Path] = []
-    for raw in result.stdout.splitlines():
+    for raw in changed:
         relpath = raw.strip()
         if not relpath or not _is_audited_path(relpath):
             continue
@@ -682,7 +714,7 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
-        config_path = _resolve_config_path()
+        config_path = _resolve_config_path(checkout_root)
         # Only 'changed' mode needs the event payload, to work out the
         # diff range. Loading it unconditionally would make 'all' mode
         # fail on events that have no payload we can parse, even though

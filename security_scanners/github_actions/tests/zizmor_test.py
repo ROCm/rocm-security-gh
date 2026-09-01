@@ -245,6 +245,154 @@ class IsAuditedPathTest(unittest.TestCase):
         self.assertFalse(_is_audited_path("deeply/nested/dir/action.yml.bak"))
 
 
+class ConfigChangeWidensTheScanTest(unittest.TestCase):
+    """A PR that only edits the zizmor config must still exercise it."""
+
+    def setUp(self):
+        self._original_cwd = Path.cwd()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.chdir(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.chdir, self._original_cwd)
+
+    def _changed(self, diff_output: str):
+        with mock.patch("zizmor.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout=diff_output, stderr=""),
+            ]
+            return _determine_changed_audited_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+
+    def test_every_discovery_location_widens_the_scan(self):
+        # The changed-file filter keeps only workflow/action/dependabot
+        # files, so a config-only PR would otherwise be filtered to an
+        # empty set and pass without the new config reaching zizmor.
+        for config in (
+            ".github/zizmor.yml",
+            ".github/zizmor.yaml",
+            "zizmor.yml",
+            "zizmor.yaml",
+        ):
+            with self.subTest(config=config):
+                self.assertIsNone(self._changed(f"{config}\n"))
+
+    def test_config_change_alongside_other_files_still_widens(self):
+        self.assertIsNone(self._changed("README.md\nzizmor.yml\n"))
+
+    def test_a_workflow_named_like_the_config_does_not_widen(self):
+        # .github/workflows/zizmor.yml is a workflow, not the config.
+        self.assertEqual(self._changed(".github/workflows/zizmor.yml\n"), [])
+
+    def test_deleting_the_config_widens_the_scan(self):
+        # Deleting a config switches the repository back to the default
+        # one, which changes what counts as a finding everywhere. Git
+        # only reports deletions when D is in --diff-filter, so this also
+        # guards that flag.
+        self.assertIsNone(self._changed(".github/zizmor.yml\n"))
+
+    def test_the_diff_asks_git_for_deletions(self):
+        with mock.patch("zizmor.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="", stderr=""),
+            ]
+            _determine_changed_audited_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+        diff_argv = run.call_args_list[1].args[0]
+        self.assertIn("--diff-filter=ACDMR", diff_argv)
+
+    def test_a_broken_config_fails_the_pr_that_introduces_it(self):
+        # The point of widening: zizmor rejects the malformed config, and
+        # that surfaces as a failed run on the PR that wrote it, rather
+        # than a green no-op that defers the breakage to someone else.
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+            mock.patch(
+                "zizmor.gha_load_github_event",
+                return_value={"before": "abc", "after": "def"},
+            ),
+            mock.patch("zizmor.gha_append_step_summary"),
+            mock.patch("zizmor.gha_set_output"),
+            mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
+            mock.patch("zizmor.subprocess.run") as run,
+            mock.patch("zizmor.get_zizmor_binary", return_value=Path("zizmor")),
+            mock.patch(
+                "zizmor._run_zizmor",
+                side_effect=RuntimeError("zizmor: invalid configuration"),
+            ) as run_zizmor,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="zizmor.yml\n", stderr=""),
+            ]
+            exit_code = main(["--scan-mode", "changed", "--source-dir", "."])
+        self.assertEqual(exit_code, 2)
+        run_zizmor.assert_called_once()
+
+
+class ConfigDeletionAgainstRealGitTest(unittest.TestCase):
+    """Deleting a config must reach the trigger through a real git diff.
+
+    The mocked tests above feed the diff output in directly, so they
+    can't tell an added config from a deleted one -- that distinction is
+    made by `git diff`'s own `--diff-filter`, which is what this
+    exercises end to end.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._repo = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "scanner@example.invalid")
+        self._git("config", "user.name", "Scanner Test")
+        (self._repo / ".github").mkdir()
+        (self._repo / ".github" / "zizmor.yml").write_text(
+            "rules: {}\n", encoding="utf-8"
+        )
+        (self._repo / "README.md").write_text("# fixture\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "seed")
+        self._base = self._git("rev-parse", "HEAD").strip()
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self._repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    def _changed_after_commit(self) -> list[Path] | None:
+        head = self._git("rev-parse", "HEAD").strip()
+        return _determine_changed_audited_files(
+            event_name="push",
+            event={"before": self._base, "after": head},
+            scan_path=self._repo,
+            checkout_root=self._repo,
+        )
+
+    def test_deleting_the_config_widens_the_scan(self):
+        # Deleting the config hands the repository back to the default
+        # here, so every workflow is now audited under different rules.
+        (self._repo / ".github" / "zizmor.yml").unlink()
+        self._git("commit", "-qam", "drop the zizmor config")
+        self.assertIsNone(self._changed_after_commit())
+
+    def test_deleting_an_unrelated_file_does_not_widen(self):
+        (self._repo / "README.md").unlink()
+        self._git("commit", "-qam", "drop the readme")
+        self.assertEqual(self._changed_after_commit(), [])
+
+
 class DetermineChangedAuditedFilesTest(unittest.TestCase):
     """Tests for `_determine_changed_audited_files`."""
 
@@ -476,24 +624,47 @@ class ResolveConfigPathTest(unittest.TestCase):
     """Tests for `_resolve_config_path`."""
 
     def setUp(self):
-        # `_resolve_config_path` resolves _CONFIG_PATH relative to
-        # REPO_ROOT (this script's own checkout), not the cwd, so patch
-        # REPO_ROOT to a tempdir to isolate each test from the real repo.
+        # The default config is resolved relative to REPO_ROOT (this
+        # script's own checkout), not the cwd, so patch REPO_ROOT to a
+        # tempdir to isolate each test from the real repo.
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_root = Path(self._tmp.name)
-        patcher = mock.patch("zizmor.REPO_ROOT", self._tmp_root)
+        self._tooling_root = self._tmp_root / "tooling"
+        self._tooling_root.mkdir()
+        self._target_root = self._tmp_root / "scan-target"
+        self._target_root.mkdir()
+        patcher = mock.patch("zizmor.REPO_ROOT", self._tooling_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-    def test_returns_config_path_when_present(self):
-        expected = self._tmp_root / _CONFIG_PATH
-        expected.write_text("rules: {}\n", encoding="utf-8")
-        self.assertEqual(_resolve_config_path(), str(expected))
+    def _write_default_config(self) -> Path:
+        path = self._tooling_root / _CONFIG_PATH
+        path.write_text("rules: {}\n", encoding="utf-8")
+        return path
 
-    def test_raises_when_missing(self):
+    def test_falls_back_to_the_default_when_the_target_ships_none(self):
+        expected = self._write_default_config()
+        self.assertEqual(_resolve_config_path(self._target_root), str(expected))
+
+    def test_the_scanned_repository_config_wins(self):
+        # A repo's own ignores describe its own workflows, so its config
+        # takes precedence over the org-wide default.
+        self._write_default_config()
+        target_config = self._target_root / "zizmor.yml"
+        target_config.write_text("rules:\n  artipacked:\n    ignore: []\n", "utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_dot_github_location_is_also_honoured(self):
+        self._write_default_config()
+        (self._target_root / ".github").mkdir()
+        target_config = self._target_root / ".github" / "zizmor.yml"
+        target_config.write_text("rules: {}\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError):
-            _resolve_config_path()
+            _resolve_config_path(self._target_root)
 
 
 class GetZizmorBinaryTest(unittest.TestCase):

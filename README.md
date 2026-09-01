@@ -31,6 +31,12 @@ to one isolated job per scanner, which means:
   cannot opt out of a scanner or relax a threshold, and every
   repository picks up a newly added scanner on its next run without a
   pull request against it.
+- **What counts as a finding is the repository's own business.** Which
+  of its paths are vendored, which fixtures hold deliberately fake
+  credentials, which findings it has already triaged: a scanned
+  repository states that in its own config file, and that file wins over
+  the default here. See [Per-repository
+  configuration](#per-repository-configuration).
 - **Scanners stay isolated.** Each one gets its own runner, its own
   workspace and its own check run, so no scanner can see another's
   leftover report files, and an individual scanner can be made a
@@ -48,6 +54,41 @@ To change policy, edit this repository: `SCANNERS` in
 `security_scanners/utils/compute_scan_matrix.py` decides which scanners
 run, and each scanner script's own defaults decide the severity that
 fails it and how sensitively it reports.
+
+### Per-repository configuration
+
+Each scanner reads the config file the scanned repository ships, and
+falls back to the copy in this repository when it ships none. The scan
+log names the file that was used, so it is always visible in the check
+which one won:
+
+| Scanner  | Read from the scanned repository, first match wins                       | Default here    |
+| -------- | ------------------------------------------------------------------------ | --------------- |
+| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `gitleaks.toml` |
+| zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `zizmor.yml`    |
+| bandit   | `bandit.yaml`, `bandit.yml`                                              | `bandit.yaml`   |
+| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `trivy.yaml`    |
+
+Each scanner's candidates are listed in the order that scanner itself
+searches, so the file CI reads is the one a local run of the same tool
+would read.
+
+This covers detection: allowlists, excluded paths, per-rule
+suppressions, and the fingerprints of findings already triaged. It does
+not cover which scanners run or which severity fails the build, which
+stay in code here for exactly that reason -- a config file cannot switch
+a scanner off, only describe the repository it is scanning.
+
+A PR that touches one of these files is scanned in full rather than
+against its changed files alone, since a config change applies to the
+whole repository. That is what makes a suppression visible in the run
+that adds it, and a broken config fail the PR that wrote it instead of
+the next unrelated one.
+
+A repository that tunes detection this way owns the consequences: an
+allowlist wide enough to hide real findings will hide them. Prefer the
+narrowest expression of the exception (a path, a rule, a fingerprint)
+over a blanket one, the same way this repository's own configs do.
 
 The scanners below are what runs today.
 
@@ -157,7 +198,7 @@ every repository -- no per-scanner jobs to add or maintain.
      contents: read
    jobs:
      security:
-       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1.0.0
        with:
          report_formats: human
    ```
@@ -179,17 +220,50 @@ every repository -- no per-scanner jobs to add or maintain.
        permissions:
          contents: read
          security-events: write
-       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1.0.0
        with:
          scan_mode: all
          report_formats: sarif
    ```
 
-There is no opt-out. If a scanner is wrong for your repository, raise it
-here rather than working around it locally, so the exception is visible
-and reviewed in one place.
+There is no opt-out from a scanner or its severity threshold. Tuning
+what it reports is a different matter: ship the config file your scanner
+looks for and it takes precedence over the default here, as described in
+[Per-repository configuration](#per-repository-configuration). If a
+scanner is wrong for your repository in a way its own config can't
+express, raise it here rather than working around it locally, so the
+exception is visible and reviewed in one place.
 
-Pin `@main` to a tag or commit SHA once these workflows have a release; see
-`.github/workflows/weekly-security-scan.yml` and
-`.github/workflows/pr-security-scan.yml` in this repo for the versions
-used to scan `rocm-security-gh` itself.
+### Versioning
+
+Pin the release tag, as above, rather than `@main`. The tag pins more
+than the workflow file: the baseline checks its own tooling out at the
+commit the caller pinned (via `job.workflow_repository` /
+`job.workflow_sha`), so one tag fixes the scanner scripts, the shared
+scanner configs, the pinned tool versions and their `checksums.sha256`
+digests as a single reviewable bundle. A given tag therefore scans the
+same way today and in six months, which is also what makes a finding
+reproducible after the fact.
+
+Tags are immutable and never moved, so picking up a new baseline is an
+explicit bump in your repository. Enable the `github-actions` ecosystem
+in your `.github/dependabot.yml` and Dependabot will raise that bump as
+a PR, the same way it does for actions:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+```
+
+Security fixes to a scanner reach your repository only once that PR
+merges, so treat these bumps as security updates rather than routine
+dependency noise.
+
+The two workflows in this repository call
+`./.github/workflows/security-baseline.yml` by local path instead, on
+purpose: the repository that develops the baseline scans itself with the
+unreleased tip, so a regression is caught here before it is tagged.

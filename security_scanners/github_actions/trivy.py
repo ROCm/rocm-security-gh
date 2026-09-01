@@ -56,6 +56,11 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
+from security_scanners.utils.scanner_config import (
+    find_config_change,
+    resolve_ignore_file,
+    resolve_scanner_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -80,6 +85,11 @@ _TRIVY_VERSION = "0.70.0"
 _TRIVY_TARBALL_FILENAME = f"trivy_{_TRIVY_VERSION}_Linux-64bit.tar.gz"
 _TRIVY_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_TRIVY_TARBALL_FILENAME}"
 _CONFIG_PATH = "trivy.yaml"
+# Where a scanned repository is allowed to keep its own config, in the
+# order trivy itself would look for one.
+_CONFIG_CANDIDATES: tuple[str, ...] = ("trivy.yaml", "trivy.yml")
+# Suppressions for findings a repository has already triaged.
+_IGNORE_FILENAME = ".trivyignore"
 # Ascending severity order; threshold comparisons rely on it. Trivy has a
 # CRITICAL tier (unlike bandit/zizmor); UNKNOWN never satisfies a threshold.
 _SEVERITY_ORDER: tuple[str, ...] = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -144,10 +154,11 @@ _AUDITED_PATTERNS: tuple[str, ...] = (
     "**/*.tf",
     "**/*.tfvars",
     "**/*.tf.json",
-    # The trivy config itself, so config-only PRs still trigger a run.
-    "trivy.yaml",
-    "trivy.yml",
 )
+# Config-only PRs widen the run to a full scan instead (see
+# _determine_changed_audited_files), so a new config or suppression is
+# exercised by the PR that introduces it.
+_CONFIG_TRIGGERS: tuple[str, ...] = (*_CONFIG_CANDIDATES, _IGNORE_FILENAME)
 
 
 @dataclass(frozen=True)
@@ -288,15 +299,19 @@ def _parse_scanners(raw: str) -> list[str]:
     return scanners
 
 
-def _resolve_config_path() -> str:
-    config_path = REPO_ROOT / _CONFIG_PATH
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"trivy config not found at '{config_path}'. "
-            "Expected it alongside this script's rocm-security-gh checkout."
-        )
-    log.info("Using trivy config: %s", config_path)
-    return str(config_path)
+def _resolve_config_path(checkout_root: Path) -> str:
+    # The fallback is anchored on REPO_ROOT (this script's own checkout),
+    # not the cwd: when this workflow is called from another repo, the cwd
+    # holds *that* repo's checkout (the scan target), not
+    # rocm-security-gh's.
+    return str(
+        resolve_scanner_config(
+            scanner="trivy",
+            checkout_root=checkout_root,
+            candidates=_CONFIG_CANDIDATES,
+            fallback=REPO_ROOT / _CONFIG_PATH,
+        ).path
+    )
 
 
 def _event_str(event: Mapping[str, object], *keys: str) -> str:
@@ -409,7 +424,13 @@ def _determine_changed_audited_files(
                 "git",
                 "diff",
                 "--name-only",
-                "--diff-filter=ACMR",
+                # D is here for the config check below: deleting a config
+                # or ignore file switches the whole repository back to the
+                # default one, which is as much a config change as editing
+                # it. Deleted manifests reaching the filter is harmless,
+                # since the is_file() check below drops paths that no
+                # longer exist.
+                "--diff-filter=ACDMR",
                 f"{base_sha}..{head_sha}",
             ],
             cwd=checkout_root,
@@ -427,9 +448,19 @@ def _determine_changed_audited_files(
         )
         return None
 
+    changed = result.stdout.splitlines()
+    config_change = find_config_change(changed, filenames=_CONFIG_TRIGGERS)
+    if config_change is not None:
+        log.info(
+            "Changed config (%s) applies to every file, so this run scans "
+            "the whole tree instead of the changed files alone",
+            config_change,
+        )
+        return None
+
     scan_root = scan_path.resolve()
     files: list[Path] = []
-    for raw in result.stdout.splitlines():
+    for raw in changed:
         relpath = raw.strip()
         if not relpath or not _is_audited_path(relpath):
             continue
@@ -454,6 +485,7 @@ def _run_trivy(
     config_path: str,
     scanners: list[str],
     scan_path: Path,
+    ignore_path: Path | None = None,
 ) -> dict[str, int]:
     """Run trivy for each user-requested format plus an internal JSON
     tally pass if the user didn't already request one, and return a
@@ -475,6 +507,10 @@ def _run_trivy(
         # Quiet the progress bar; the wrapper logs its own summary.
         "--quiet",
     ]
+    if ignore_path is not None:
+        # trivy resolves this relative to its working directory, which is
+        # this repo's checkout rather than the scanned one.
+        base_args.extend(["--ignorefile", str(ignore_path)])
 
     # Reuse a user-requested JSON report for the tally, else add one.
     user_json = next((t for t in user_targets if t.fmt == "json"), None)
@@ -657,7 +693,12 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
-        config_path = _resolve_config_path()
+        config_path = _resolve_config_path(checkout_root)
+        ignore_path = resolve_ignore_file(
+            scanner="trivy",
+            checkout_root=checkout_root,
+            filename=_IGNORE_FILENAME,
+        )
         # Only 'changed' mode needs the event payload, to work out the
         # diff range. Loading it unconditionally would make 'all' mode
         # fail on events that have no payload we can parse, even though
@@ -722,6 +763,7 @@ def main(argv: list[str]) -> int:
             config_path=config_path,
             scanners=scanners,
             scan_path=source_dir,
+            ignore_path=ignore_path,
         )
         # Set outputs only after a successful run, gated on the report
         # actually existing on disk: the workflow's upload steps run with

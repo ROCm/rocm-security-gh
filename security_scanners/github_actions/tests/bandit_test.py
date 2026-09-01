@@ -234,6 +234,97 @@ class DiffRangeTest(unittest.TestCase):
         self.assertIsNone(_diff_range("workflow_dispatch", {}))
 
 
+class ConfigChangeWidensTheScanTest(unittest.TestCase):
+    """A PR that only edits the bandit config must still exercise it."""
+
+    def setUp(self):
+        self._original_cwd = Path.cwd()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.chdir(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.chdir, self._original_cwd)
+
+    def _changed(self, diff_output: str):
+        with mock.patch("bandit.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout=diff_output, stderr=""),
+            ]
+            return _determine_changed_python_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+
+    def test_config_only_change_scans_the_whole_tree(self):
+        # The changed-file filter keeps only .py/.pyw, so a config-only
+        # PR would otherwise be filtered to an empty set and pass without
+        # the new config ever reaching bandit.
+        for config in ("bandit.yaml", "bandit.yml"):
+            with self.subTest(config=config):
+                self.assertIsNone(self._changed(f"{config}\n"))
+
+    def test_config_change_alongside_other_files_still_widens(self):
+        self.assertIsNone(self._changed("README.md\nbandit.yaml\n"))
+
+    def test_unrelated_yaml_does_not_widen_the_scan(self):
+        self.assertEqual(self._changed("docs/bandit.yaml\nREADME.md\n"), [])
+
+    def test_deleting_the_config_widens_the_scan(self):
+        # Deleting a config switches the repository back to the default
+        # one, which changes what counts as a finding everywhere. Git
+        # only reports deletions when D is in --diff-filter, so this also
+        # guards that flag.
+        self.assertIsNone(self._changed("bandit.yaml\n"))
+
+    def test_the_diff_asks_git_for_deletions(self):
+        with mock.patch("bandit.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="", stderr=""),
+            ]
+            _determine_changed_python_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+        diff_argv = run.call_args_list[1].args[0]
+        self.assertIn("--diff-filter=ACDMR", diff_argv)
+
+    def test_a_deleted_python_file_is_not_scanned(self):
+        # D widens the diff, so the filter now sees paths that no longer
+        # exist; they must not reach bandit as scan targets.
+        self.assertEqual(self._changed("pkg/deleted.py\n"), [])
+
+    def test_a_broken_config_fails_the_pr_that_introduces_it(self):
+        # The point of widening: bandit rejects the malformed config, and
+        # that surfaces as a failed run on the PR that wrote it, rather
+        # than a green no-op that defers the breakage to someone else.
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+            mock.patch(
+                "bandit.gha_load_github_event",
+                return_value={"before": "abc", "after": "def"},
+            ),
+            mock.patch("bandit.gha_append_step_summary"),
+            mock.patch("bandit.gha_set_output"),
+            mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
+            mock.patch("bandit.subprocess.run") as run,
+            mock.patch("bandit.get_bandit_binary", return_value=Path("bandit")),
+            mock.patch(
+                "bandit._run_bandit",
+                side_effect=RuntimeError("bandit: error: invalid config"),
+            ) as run_bandit,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="bandit.yaml\n", stderr=""),
+            ]
+            exit_code = main(["--scan-mode", "changed", "--source-dir", "."])
+        self.assertEqual(exit_code, 2)
+        run_bandit.assert_called_once()
+
+
 class DetermineChangedPythonFilesTest(unittest.TestCase):
     """Tests for `_determine_changed_python_files`."""
 
@@ -453,24 +544,46 @@ class ResolveConfigPathTest(unittest.TestCase):
     """Tests for `_resolve_config_path`."""
 
     def setUp(self):
-        # `_resolve_config_path` resolves _CONFIG_PATH relative to
-        # REPO_ROOT (this script's own checkout), not the cwd, so patch
-        # REPO_ROOT to a tempdir to isolate each test from the real repo.
+        # The default config is resolved relative to REPO_ROOT (this
+        # script's own checkout), not the cwd, so patch REPO_ROOT to a
+        # tempdir to isolate each test from the real repo.
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_root = Path(self._tmp.name)
-        patcher = mock.patch("bandit.REPO_ROOT", self._tmp_root)
+        self._tooling_root = self._tmp_root / "tooling"
+        self._tooling_root.mkdir()
+        self._target_root = self._tmp_root / "scan-target"
+        self._target_root.mkdir()
+        patcher = mock.patch("bandit.REPO_ROOT", self._tooling_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-    def test_returns_config_path_when_present(self):
-        expected = self._tmp_root / _CONFIG_PATH
-        expected.write_text("exclude_dirs: []\n", encoding="utf-8")
-        self.assertEqual(_resolve_config_path(), str(expected))
+    def _write_default_config(self) -> Path:
+        path = self._tooling_root / _CONFIG_PATH
+        path.write_text("exclude_dirs: []\n", encoding="utf-8")
+        return path
 
-    def test_raises_when_missing(self):
+    def test_falls_back_to_the_default_when_the_target_ships_none(self):
+        expected = self._write_default_config()
+        self.assertEqual(_resolve_config_path(self._target_root), str(expected))
+
+    def test_the_scanned_repository_config_wins(self):
+        # A repo's own exclude_dirs describe its own tree, so its config
+        # takes precedence over the org-wide default.
+        self._write_default_config()
+        target_config = self._target_root / "bandit.yaml"
+        target_config.write_text("exclude_dirs:\n  - third_party\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_yml_spelling_is_also_honoured(self):
+        self._write_default_config()
+        target_config = self._target_root / "bandit.yml"
+        target_config.write_text("exclude_dirs: []\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError):
-            _resolve_config_path()
+            _resolve_config_path(self._target_root)
 
 
 class GetBanditBinaryTest(unittest.TestCase):
