@@ -71,7 +71,9 @@ def resolve_scanner_config(
     return ResolvedConfig(path=fallback, from_scan_target=False)
 
 
-def resolve_ignore_file(*, scanner: str, checkout_root: Path, filename: str) -> Path | None:
+def resolve_ignore_file(
+    *, scanner: str, checkout_root: Path, filename: str
+) -> Path | None:
     """Return the scan target's suppression file, if it ships one.
 
     Tools like gitleaks and trivy look for these next to their working
@@ -82,5 +84,7 @@ def resolve_ignore_file(*, scanner: str, checkout_root: Path, filename: str) -> 
     ignore_path = checkout_root / filename
     if not ignore_path.is_file():
         return None
-    log.info("Using %s ignore file from the scanned repository: %s", scanner, ignore_path)
+    log.info(
+        "Using %s ignore file from the scanned repository: %s", scanner, ignore_path
+    )
     return ignore_path
