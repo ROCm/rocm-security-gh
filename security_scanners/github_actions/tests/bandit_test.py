@@ -453,24 +453,46 @@ class ResolveConfigPathTest(unittest.TestCase):
     """Tests for `_resolve_config_path`."""
 
     def setUp(self):
-        # `_resolve_config_path` resolves _CONFIG_PATH relative to
-        # REPO_ROOT (this script's own checkout), not the cwd, so patch
-        # REPO_ROOT to a tempdir to isolate each test from the real repo.
+        # The default config is resolved relative to REPO_ROOT (this
+        # script's own checkout), not the cwd, so patch REPO_ROOT to a
+        # tempdir to isolate each test from the real repo.
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_root = Path(self._tmp.name)
-        patcher = mock.patch("bandit.REPO_ROOT", self._tmp_root)
+        self._tooling_root = self._tmp_root / "tooling"
+        self._tooling_root.mkdir()
+        self._target_root = self._tmp_root / "scan-target"
+        self._target_root.mkdir()
+        patcher = mock.patch("bandit.REPO_ROOT", self._tooling_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-    def test_returns_config_path_when_present(self):
-        expected = self._tmp_root / _CONFIG_PATH
-        expected.write_text("exclude_dirs: []\n", encoding="utf-8")
-        self.assertEqual(_resolve_config_path(), str(expected))
+    def _write_default_config(self) -> Path:
+        path = self._tooling_root / _CONFIG_PATH
+        path.write_text("exclude_dirs: []\n", encoding="utf-8")
+        return path
 
-    def test_raises_when_missing(self):
+    def test_falls_back_to_the_default_when_the_target_ships_none(self):
+        expected = self._write_default_config()
+        self.assertEqual(_resolve_config_path(self._target_root), str(expected))
+
+    def test_the_scanned_repository_config_wins(self):
+        # A repo's own exclude_dirs describe its own tree, so its config
+        # takes precedence over the org-wide default.
+        self._write_default_config()
+        target_config = self._target_root / "bandit.yaml"
+        target_config.write_text("exclude_dirs:\n  - third_party\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_yml_spelling_is_also_honoured(self):
+        self._write_default_config()
+        target_config = self._target_root / "bandit.yml"
+        target_config.write_text("exclude_dirs: []\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError):
-            _resolve_config_path()
+            _resolve_config_path(self._target_root)
 
 
 class GetBanditBinaryTest(unittest.TestCase):

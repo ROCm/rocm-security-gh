@@ -160,6 +160,49 @@ class ParseReportFormatsTest(unittest.TestCase):
         self.assertIn("'xml'", str(ctx.exception))
 
 
+class RunGitleaksIgnoreFileTest(unittest.TestCase):
+    """Tests that a scanned repository's `.gitleaksignore` is honoured."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _run(self, ignore_path: Path | None) -> list[str]:
+        """Run `_run_gitleaks` against a stub gitleaks, return its argv."""
+        commands: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            Path(cmd[cmd.index("--report-path") + 1]).write_text("", encoding="utf-8")
+            return mock.Mock(returncode=0)
+
+        target = _ReportTarget(fmt="csv", path=self._tmp_root / "report.csv")
+        with mock.patch("gitleaks.subprocess.run", side_effect=fake_run):
+            _run_gitleaks(
+                Path("gitleaks"),
+                [target],
+                config_path="gitleaks.toml",
+                log_opts="",
+                source_dir=self._tmp_root,
+                ignore_path=ignore_path,
+            )
+        return commands[0]
+
+    def test_ignore_path_is_passed_when_the_target_ships_one(self):
+        # gitleaks resolves .gitleaksignore against its working directory,
+        # which is this repo's checkout, so the scanned repository's
+        # already-triaged fingerprints only apply if the path is explicit.
+        ignore_path = self._tmp_root / ".gitleaksignore"
+        ignore_path.write_text("fingerprint-1\n", encoding="utf-8")
+        cmd = self._run(ignore_path)
+        self.assertIn("--gitleaks-ignore-path", cmd)
+        self.assertEqual(cmd[cmd.index("--gitleaks-ignore-path") + 1], str(ignore_path))
+
+    def test_no_ignore_flag_when_the_target_ships_none(self):
+        self.assertNotIn("--gitleaks-ignore-path", self._run(None))
+
+
 class DetermineLogOptsTest(unittest.TestCase):
     """Tests for `_determine_log_opts`."""
 
@@ -315,25 +358,48 @@ class ResolveConfigPathTest(unittest.TestCase):
     """Tests for `_resolve_config_path`."""
 
     def setUp(self):
-        # `_resolve_config_path` resolves _CONFIG_PATH relative to
-        # REPO_ROOT (this script's own checkout), not the cwd, so patch
-        # REPO_ROOT to a tempdir to isolate each test from the real repo.
+        # The default config is resolved relative to REPO_ROOT (this
+        # script's own checkout), not the cwd, so patch REPO_ROOT to a
+        # tempdir to isolate each test from the real repo.
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_root = Path(self._tmp.name)
-        patcher = mock.patch("gitleaks.REPO_ROOT", self._tmp_root)
+        self._tooling_root = self._tmp_root / "tooling"
+        self._tooling_root.mkdir()
+        self._target_root = self._tmp_root / "scan-target"
+        self._target_root.mkdir()
+        patcher = mock.patch("gitleaks.REPO_ROOT", self._tooling_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-    def test_returns_config_path_when_present(self):
-        expected = self._tmp_root / _CONFIG_PATH
-        expected.write_text("# stub config", encoding="utf-8")
-        self.assertEqual(_resolve_config_path(), str(expected))
+    def _write_default_config(self) -> Path:
+        path = self._tooling_root / _CONFIG_PATH
+        path.write_text("# stub config", encoding="utf-8")
+        return path
 
-    def test_raises_when_missing(self):
+    def test_falls_back_to_the_default_when_the_target_ships_none(self):
+        expected = self._write_default_config()
+        self.assertEqual(_resolve_config_path(self._target_root), str(expected))
+
+    def test_the_scanned_repository_config_wins(self):
+        # A repo's own allowlists describe its own tree -- vendored paths,
+        # fake credentials in fixtures -- so its config takes precedence
+        # over the org-wide default.
+        self._write_default_config()
+        target_config = self._target_root / "gitleaks.toml"
+        target_config.write_text("title = 'TheRock gitleaks config'", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_dotfile_location_is_also_honoured(self):
+        self._write_default_config()
+        target_config = self._target_root / ".gitleaks.toml"
+        target_config.write_text("title = 'dotfile config'", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError) as ctx:
-            _resolve_config_path()
-        self.assertIn(str(self._tmp_root / _CONFIG_PATH), str(ctx.exception))
+            _resolve_config_path(self._target_root)
+        self.assertIn(str(self._tooling_root / _CONFIG_PATH), str(ctx.exception))
 
 
 class MdCodeFenceTest(unittest.TestCase):
@@ -501,7 +567,9 @@ class RedactionRegressionTest(unittest.TestCase):
         leaks_found = _run_gitleaks(
             self.binary,
             targets,
-            config_path=_resolve_config_path(),
+            # The fixture repo ships no config of its own, so this is the
+            # default config the scanner would fall back to in CI.
+            config_path=_resolve_config_path(self._repo_dir),
             log_opts="",
             source_dir=self._repo_dir,
         )

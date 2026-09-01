@@ -31,6 +31,12 @@ to one isolated job per scanner, which means:
   cannot opt out of a scanner or relax a threshold, and every
   repository picks up a newly added scanner on its next run without a
   pull request against it.
+- **What counts as a finding is the repository's own business.** Which
+  of its paths are vendored, which fixtures hold deliberately fake
+  credentials, which findings it has already triaged: a scanned
+  repository states that in its own config file, and that file wins over
+  the default here. See [Per-repository
+  configuration](#per-repository-configuration).
 - **Scanners stay isolated.** Each one gets its own runner, its own
   workspace and its own check run, so no scanner can see another's
   leftover report files, and an individual scanner can be made a
@@ -48,6 +54,31 @@ To change policy, edit this repository: `SCANNERS` in
 `security_scanners/utils/compute_scan_matrix.py` decides which scanners
 run, and each scanner script's own defaults decide the severity that
 fails it and how sensitively it reports.
+
+### Per-repository configuration
+
+Each scanner reads the config file the scanned repository ships, and
+falls back to the copy in this repository when it ships none. The scan
+log names the file that was used, so it is always visible in the check
+which one won:
+
+| Scanner  | Read from the scanned repository                     | Default here    |
+| -------- | ---------------------------------------------------- | --------------- |
+| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, `.gitleaksignore` | `gitleaks.toml` |
+| zizmor   | `zizmor.yml`, `.github/zizmor.yml`                   | `zizmor.yml`    |
+| bandit   | `bandit.yaml`, `bandit.yml`                          | `bandit.yaml`   |
+| trivy    | `trivy.yaml`, `trivy.yml`, `.trivyignore`            | `trivy.yaml`    |
+
+This covers detection: allowlists, excluded paths, per-rule
+suppressions, and the fingerprints of findings already triaged. It does
+not cover which scanners run or which severity fails the build, which
+stay in code here for exactly that reason -- a config file cannot switch
+a scanner off, only describe the repository it is scanning.
+
+A repository that tunes detection this way owns the consequences: an
+allowlist wide enough to hide real findings will hide them. Prefer the
+narrowest expression of the exception (a path, a rule, a fingerprint)
+over a blanket one, the same way this repository's own configs do.
 
 The scanners below are what runs today.
 
@@ -185,9 +216,13 @@ every repository -- no per-scanner jobs to add or maintain.
          report_formats: sarif
    ```
 
-There is no opt-out. If a scanner is wrong for your repository, raise it
-here rather than working around it locally, so the exception is visible
-and reviewed in one place.
+There is no opt-out from a scanner or its severity threshold. Tuning
+what it reports is a different matter: ship the config file your scanner
+looks for and it takes precedence over the default here, as described in
+[Per-repository configuration](#per-repository-configuration). If a
+scanner is wrong for your repository in a way its own config can't
+express, raise it here rather than working around it locally, so the
+exception is visible and reviewed in one place.
 
 ### Versioning
 

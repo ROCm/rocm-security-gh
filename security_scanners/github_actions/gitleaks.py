@@ -33,6 +33,10 @@ from security_scanners.utils.binary_checksums import (
     download_and_verify_tarball,
     expected_sha256,
 )
+from security_scanners.utils.scanner_config import (
+    resolve_ignore_file,
+    resolve_scanner_config,
+)
 from security_scanners.utils.github_actions_api import (
     gha_append_step_summary,
     gha_load_github_event,
@@ -64,6 +68,11 @@ _GITLEAKS_VERSION = "8.30.1"
 _GITLEAKS_TARBALL_FILENAME = f"gitleaks_{_GITLEAKS_VERSION}_linux_x64.tar.gz"
 _GITLEAKS_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_GITLEAKS_TARBALL_FILENAME}"
 _CONFIG_PATH = "gitleaks.toml"
+# Where a scanned repository is allowed to keep its own config, in the
+# order gitleaks itself would look for one.
+_CONFIG_CANDIDATES: tuple[str, ...] = ("gitleaks.toml", ".gitleaks.toml")
+# Fingerprint suppressions for findings a repository has already triaged.
+_IGNORE_FILENAME = ".gitleaksignore"
 # Pin --exit-code to 1 so we can tell clean (0) from leaks (1) from a
 # gitleaks error (>1).
 _LEAK_EXIT_CODE = 1
@@ -182,18 +191,19 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     return targets
 
 
-def _resolve_config_path() -> str:
-    # Anchored on REPO_ROOT (this script's own checkout), not the cwd:
-    # when this workflow is called from another repo, the cwd holds
-    # *that* repo's checkout (the scan target), not rocm-security-gh's.
-    config_path = REPO_ROOT / _CONFIG_PATH
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"gitleaks config not found at '{config_path}'. "
-            "Expected it alongside this script's rocm-security-gh checkout."
-        )
-    log.info("Using gitleaks config: %s", config_path)
-    return str(config_path)
+def _resolve_config_path(checkout_root: Path) -> str:
+    # The fallback is anchored on REPO_ROOT (this script's own checkout),
+    # not the cwd: when this workflow is called from another repo, the cwd
+    # holds *that* repo's checkout (the scan target), not
+    # rocm-security-gh's.
+    return str(
+        resolve_scanner_config(
+            scanner="gitleaks",
+            checkout_root=checkout_root,
+            candidates=_CONFIG_CANDIDATES,
+            fallback=REPO_ROOT / _CONFIG_PATH,
+        ).path
+    )
 
 
 def _determine_log_opts(
@@ -394,6 +404,7 @@ def _run_gitleaks(
     config_path: str,
     log_opts: str,
     source_dir: Path,
+    ignore_path: Path | None = None,
 ) -> bool:
     """Run gitleaks once per target. Return `True` if any leaks were found.
 
@@ -411,6 +422,10 @@ def _run_gitleaks(
         str(_LEAK_EXIT_CODE),
     ]
     base_args.extend(["--config", config_path])
+    if ignore_path is not None:
+        # gitleaks resolves this relative to its working directory, which
+        # is this repo's checkout rather than the scanned one.
+        base_args.extend(["--gitleaks-ignore-path", str(ignore_path)])
     if log_opts:
         base_args.append(f"--log-opts={log_opts}")
 
@@ -546,6 +561,18 @@ def build_parser() -> argparse.ArgumentParser:
             "path must exist."
         ),
     )
+    p.add_argument(
+        "--checkout-root",
+        default=os.environ.get("SCANNER_CHECKOUT_ROOT", "."),
+        help=(
+            "Git checkout root of the repository being scanned (default "
+            "%(default)s). Where this script looks for the repository's own "
+            f"gitleaks config and its {_IGNORE_FILENAME}; only matters when "
+            "this differs from --source-dir (e.g. --source-dir restricts to "
+            "a subtree, or the scan target isn't checked out at this "
+            "process's cwd)."
+        ),
+    )
     return p
 
 
@@ -568,8 +595,15 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
+    checkout_root = Path(args.checkout_root)
+
     try:
-        config_path = _resolve_config_path()
+        config_path = _resolve_config_path(checkout_root)
+        ignore_path = resolve_ignore_file(
+            scanner="gitleaks",
+            checkout_root=checkout_root,
+            filename=_IGNORE_FILENAME,
+        )
         # Only 'changed' mode derives a git range from the event, so 'all'
         # mode is handed no payload at all rather than one it ignores:
         # loading it unconditionally would make a scheduled or dispatch
@@ -602,6 +636,7 @@ def main(argv: list[str]) -> int:
             config_path=config_path,
             log_opts=log_opts,
             source_dir=source_dir,
+            ignore_path=ignore_path,
         )
         # Set outputs only after a successful run, gated on the report
         # actually existing on disk: the workflow's upload steps run with

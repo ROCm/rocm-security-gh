@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from trivy import (
     _CONFIG_PATH,
+    _ReportTarget,
     _SEVERITY_ORDER,
     _TRIVY_TARBALL_FILENAME,
     _TRIVY_VERSION,
@@ -22,6 +23,7 @@ from trivy import (
     _parse_report_formats,
     _parse_scanners,
     _resolve_config_path,
+    _run_trivy,
     _tally_findings_by_severity,
     _trivy_subprocess_env,
     get_trivy_binary,
@@ -457,28 +459,94 @@ class TallyFindingsBySeverityTest(unittest.TestCase):
             _tally_findings_by_severity(path)
 
 
+class RunTrivyIgnoreFileTest(unittest.TestCase):
+    """Tests that a scanned repository's `.trivyignore` is honoured."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _run(self, ignore_path: Path | None) -> list[str]:
+        """Run `_run_trivy` against a stub trivy, return its first argv."""
+        commands: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            output = Path(cmd[cmd.index("--output") + 1])
+            output.write_text('{"Results": []}', encoding="utf-8")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        target = _ReportTarget(fmt="json", path=self._tmp_root / "report.json")
+        with mock.patch("trivy.subprocess.run", side_effect=fake_run):
+            _run_trivy(
+                Path("trivy"),
+                [target],
+                config_path="trivy.yaml",
+                scanners=["vuln"],
+                scan_path=self._tmp_root,
+                ignore_path=ignore_path,
+            )
+        return commands[0]
+
+    def test_ignorefile_is_passed_when_the_target_ships_one(self):
+        # trivy resolves .trivyignore against its working directory, which
+        # is this repo's checkout, so a scanned repository's accepted-risk
+        # entries only apply if the path is explicit.
+        ignore_path = self._tmp_root / ".trivyignore"
+        ignore_path.write_text("CVE-2021-44228\n", encoding="utf-8")
+        cmd = self._run(ignore_path)
+        self.assertIn("--ignorefile", cmd)
+        self.assertEqual(cmd[cmd.index("--ignorefile") + 1], str(ignore_path))
+
+    def test_no_ignorefile_flag_when_the_target_ships_none(self):
+        self.assertNotIn("--ignorefile", self._run(None))
+
+
 class ResolveConfigPathTest(unittest.TestCase):
     """Tests for `_resolve_config_path`."""
 
     def setUp(self):
-        # `_resolve_config_path` resolves _CONFIG_PATH relative to
-        # REPO_ROOT (this script's own checkout), not the cwd, so patch
-        # REPO_ROOT to a tempdir to isolate each test from the real repo.
+        # The default config is resolved relative to REPO_ROOT (this
+        # script's own checkout), not the cwd, so patch REPO_ROOT to a
+        # tempdir to isolate each test from the real repo.
         self._tmp = tempfile.TemporaryDirectory()
         self._tmp_root = Path(self._tmp.name)
-        patcher = mock.patch("trivy.REPO_ROOT", self._tmp_root)
+        self._tooling_root = self._tmp_root / "tooling"
+        self._tooling_root.mkdir()
+        self._target_root = self._tmp_root / "scan-target"
+        self._target_root.mkdir()
+        patcher = mock.patch("trivy.REPO_ROOT", self._tooling_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-    def test_returns_config_path_when_present(self):
-        expected = self._tmp_root / _CONFIG_PATH
-        expected.write_text("scan:\n  skip-dirs: []\n", encoding="utf-8")
-        self.assertEqual(_resolve_config_path(), str(expected))
+    def _write_default_config(self) -> Path:
+        path = self._tooling_root / _CONFIG_PATH
+        path.write_text("scan:\n  skip-dirs: []\n", encoding="utf-8")
+        return path
 
-    def test_raises_when_missing(self):
+    def test_falls_back_to_the_default_when_the_target_ships_none(self):
+        expected = self._write_default_config()
+        self.assertEqual(_resolve_config_path(self._target_root), str(expected))
+
+    def test_the_scanned_repository_config_wins(self):
+        # A repo's own skip-dirs and policy tuning describe its own tree,
+        # so its config takes precedence over the org-wide default.
+        self._write_default_config()
+        target_config = self._target_root / "trivy.yaml"
+        target_config.write_text("scan:\n  skip-dirs:\n  - vendor\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_yml_spelling_is_also_honoured(self):
+        self._write_default_config()
+        target_config = self._target_root / "trivy.yml"
+        target_config.write_text("scan:\n  skip-dirs: []\n", encoding="utf-8")
+        self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError):
-            _resolve_config_path()
+            _resolve_config_path(self._target_root)
 
 
 class GetTrivyBinaryTest(unittest.TestCase):

@@ -46,6 +46,7 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
+from security_scanners.utils.scanner_config import resolve_scanner_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -82,6 +83,10 @@ _BANDIT_SDIST_URL = (
     f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_BANDIT_SDIST_FILENAME}"
 )
 _CONFIG_PATH = "bandit.yaml"
+# Where a scanned repository is allowed to keep its own config. Only the
+# YAML form bandit's `-c` accepts: a `.bandit` file is INI-formatted CLI
+# defaults, which `-c` can't read.
+_CONFIG_CANDIDATES: tuple[str, ...] = ("bandit.yaml", "bandit.yml")
 # Bandit exits with this code when it finds any issue at/above the
 # --severity-level; we always scan at low, so it just means "any finding".
 _FINDING_EXIT_CODE = 1
@@ -263,18 +268,19 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     return targets
 
 
-def _resolve_config_path() -> str:
-    # Anchored on REPO_ROOT (this script's own checkout), not the cwd:
-    # when this workflow is called from another repo, the cwd holds
-    # *that* repo's checkout (the scan target), not rocm-security-gh's.
-    config_path = REPO_ROOT / _CONFIG_PATH
-    if not config_path.is_file():
-        raise FileNotFoundError(
-            f"bandit config not found at '{config_path}'. "
-            "Expected it alongside this script's rocm-security-gh checkout."
-        )
-    log.info("Using bandit config: %s", config_path)
-    return str(config_path)
+def _resolve_config_path(checkout_root: Path) -> str:
+    # The fallback is anchored on REPO_ROOT (this script's own checkout),
+    # not the cwd: when this workflow is called from another repo, the cwd
+    # holds *that* repo's checkout (the scan target), not
+    # rocm-security-gh's.
+    return str(
+        resolve_scanner_config(
+            scanner="bandit",
+            checkout_root=checkout_root,
+            candidates=_CONFIG_CANDIDATES,
+            fallback=REPO_ROOT / _CONFIG_PATH,
+        ).path
+    )
 
 
 def _event_str(event: Mapping[str, object], *keys: str) -> str:
@@ -659,7 +665,7 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
-        config_path = _resolve_config_path()
+        config_path = _resolve_config_path(checkout_root)
         # Only 'changed' mode needs the event payload, to work out the
         # diff range. Loading it unconditionally would make 'all' mode
         # fail on events that have no payload we can parse, even though
