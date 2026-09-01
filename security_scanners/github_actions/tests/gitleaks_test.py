@@ -174,6 +174,7 @@ class RunGitleaksIgnoreFileTest(unittest.TestCase):
 
         def fake_run(cmd, **kwargs):
             commands.append(cmd)
+            self._kwargs = kwargs
             Path(cmd[cmd.index("--report-path") + 1]).write_text("", encoding="utf-8")
             return mock.Mock(returncode=0)
 
@@ -185,22 +186,89 @@ class RunGitleaksIgnoreFileTest(unittest.TestCase):
                 config_path="gitleaks.toml",
                 log_opts="",
                 source_dir=self._tmp_root,
+                checkout_root=self._tmp_root,
                 ignore_path=ignore_path,
             )
         return commands[0]
 
     def test_ignore_path_is_passed_when_the_target_ships_one(self):
-        # gitleaks resolves .gitleaksignore against its working directory,
-        # which is this repo's checkout, so the scanned repository's
-        # already-triaged fingerprints only apply if the path is explicit.
+        # gitleaks reads .gitleaksignore from its working directory, so
+        # passing the path explicitly keeps the scanned repository's
+        # already-triaged fingerprints applied regardless of where the
+        # scan is invoked from.
         ignore_path = self._tmp_root / ".gitleaksignore"
         ignore_path.write_text("fingerprint-1\n", encoding="utf-8")
         cmd = self._run(ignore_path)
         self.assertIn("--gitleaks-ignore-path", cmd)
-        self.assertEqual(cmd[cmd.index("--gitleaks-ignore-path") + 1], str(ignore_path))
+        self.assertEqual(
+            cmd[cmd.index("--gitleaks-ignore-path") + 1],
+            str(ignore_path.resolve()),
+        )
 
     def test_no_ignore_flag_when_the_target_ships_none(self):
         self.assertNotIn("--gitleaks-ignore-path", self._run(None))
+
+
+class RunGitleaksWorkingDirectoryTest(unittest.TestCase):
+    """gitleaks must run from the scanned repository, not this checkout."""
+
+    def setUp(self):
+        self._original_cwd = Path.cwd()
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tooling_root = Path(self._tmp.name) / "tooling"
+        self._target_root = Path(self._tmp.name) / "tooling" / ".scan-target"
+        self._target_root.mkdir(parents=True)
+        os.chdir(self._tooling_root)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.chdir, self._original_cwd)
+
+    def _invoke(self) -> tuple[list[str], dict[str, object]]:
+        """Return the argv and subprocess kwargs of a stubbed gitleaks run."""
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            Path(cmd[cmd.index("--report-path") + 1]).write_text("", encoding="utf-8")
+            return mock.Mock(returncode=0)
+
+        # Paths as main() has them: relative to this process's cwd, which
+        # is the tooling checkout rather than the scanned repository.
+        with mock.patch("gitleaks.subprocess.run", side_effect=fake_run):
+            _run_gitleaks(
+                Path("bin/gitleaks"),
+                [_ReportTarget(fmt="csv", path=Path("gitleaks-report.csv"))],
+                config_path=".scan-target/gitleaks.toml",
+                log_opts="",
+                source_dir=Path(".scan-target"),
+                checkout_root=Path(".scan-target"),
+                ignore_path=Path(".scan-target/.gitleaksignore"),
+            )
+        return calls[0]
+
+    def test_runs_from_the_scanned_repository(self):
+        # A scanned repo's config may extend another by relative path,
+        # which gitleaks resolves from wherever it was invoked -- from the
+        # tooling checkout that path is missing, or is a different file.
+        _, kwargs = self._invoke()
+        self.assertEqual(kwargs["cwd"], Path(".scan-target"))
+
+    def test_every_path_is_absolute(self):
+        # The paths above are relative to the tooling checkout, so moving
+        # the working directory would silently repoint all of them.
+        cmd, _ = self._invoke()
+        flags = ("--source", "--config", "--gitleaks-ignore-path", "--report-path")
+        for flag in flags:
+            with self.subTest(flag=flag):
+                self.assertTrue(Path(cmd[cmd.index(flag) + 1]).is_absolute())
+        self.assertTrue(Path(cmd[0]).is_absolute())
+
+    def test_the_report_still_lands_in_the_tooling_checkout(self):
+        # The workflow uploads the report by its relative path, so it has
+        # to stay next to this process, not follow gitleaks into the scan
+        # target.
+        cmd, _ = self._invoke()
+        report = Path(cmd[cmd.index("--report-path") + 1])
+        self.assertEqual(report, (self._tooling_root / "gitleaks-report.csv").resolve())
 
 
 class DetermineLogOptsTest(unittest.TestCase):
@@ -572,6 +640,7 @@ class RedactionRegressionTest(unittest.TestCase):
             config_path=_resolve_config_path(self._repo_dir),
             log_opts="",
             source_dir=self._repo_dir,
+            checkout_root=self._repo_dir,
         )
         self.assertTrue(leaks_found, "fixture secret was not detected at all")
         for target in targets:

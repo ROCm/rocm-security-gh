@@ -411,28 +411,39 @@ def _run_gitleaks(
     config_path: str,
     log_opts: str,
     source_dir: Path,
+    checkout_root: Path,
     ignore_path: Path | None = None,
 ) -> bool:
     """Run gitleaks once per target. Return `True` if any leaks were found.
 
+    Runs in `checkout_root`, the scanned repository. A config that builds
+    on another declares it as `[extend] path`, which gitleaks documents
+    as "relative to where gitleaks was invoked, not the location of the
+    base config" -- so a scanned repository's extended config only
+    resolves to the file it means if gitleaks is invoked from that
+    repository, rather than from this tooling checkout where the same
+    relative path is either missing or, worse, a different file.
+
+    Every path handed to gitleaks is therefore absolute: they are
+    written relative to this process's cwd, which is not where gitleaks
+    now runs.
+
     Raises :class:`RuntimeError` for unexpected gitleaks exit codes.
     """
     base_args: list[str] = [
-        str(binary),
+        str(binary.resolve()),
         "detect",
         "--source",
-        str(source_dir),
+        str(source_dir.resolve()),
         "--redact",
         "--verbose",
         "--no-banner",
         "--exit-code",
         str(_LEAK_EXIT_CODE),
     ]
-    base_args.extend(["--config", config_path])
+    base_args.extend(["--config", str(Path(config_path).resolve())])
     if ignore_path is not None:
-        # gitleaks resolves this relative to its working directory, which
-        # is this repo's checkout rather than the scanned one.
-        base_args.extend(["--gitleaks-ignore-path", str(ignore_path)])
+        base_args.extend(["--gitleaks-ignore-path", str(ignore_path.resolve())])
     if log_opts:
         base_args.append(f"--log-opts={log_opts}")
 
@@ -441,9 +452,15 @@ def _run_gitleaks(
     # per format. Revisit when https://github.com/gitleaks/gitleaks/pull/1232
     # is merged.
     for tgt in targets:
-        cmd = [*base_args, "--report-format", tgt.fmt, "--report-path", str(tgt.path)]
-        log.info("Running: %s", " ".join(cmd))
-        rc = subprocess.run(cmd, check=False).returncode
+        cmd = [
+            *base_args,
+            "--report-format",
+            tgt.fmt,
+            "--report-path",
+            str(tgt.path.resolve()),
+        ]
+        log.info("Running (cwd=%s): %s", checkout_root, " ".join(cmd))
+        rc = subprocess.run(cmd, cwd=checkout_root, check=False).returncode
         if rc == 0 or rc == _LEAK_EXIT_CODE:
             if rc == _LEAK_EXIT_CODE:
                 leaks_found = True
@@ -643,6 +660,7 @@ def main(argv: list[str]) -> int:
             config_path=config_path,
             log_opts=log_opts,
             source_dir=source_dir,
+            checkout_root=checkout_root,
             ignore_path=ignore_path,
         )
         # Set outputs only after a successful run, gated on the report
