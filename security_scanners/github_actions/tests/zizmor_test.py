@@ -287,6 +287,27 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
         # .github/workflows/zizmor.yml is a workflow, not the config.
         self.assertEqual(self._changed(".github/workflows/zizmor.yml\n"), [])
 
+    def test_deleting_the_config_widens_the_scan(self):
+        # Deleting a config switches the repository back to the default
+        # one, which changes what counts as a finding everywhere. Git
+        # only reports deletions when D is in --diff-filter, so this also
+        # guards that flag.
+        self.assertIsNone(self._changed(".github/zizmor.yml\n"))
+
+    def test_the_diff_asks_git_for_deletions(self):
+        with mock.patch("zizmor.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="", stderr=""),
+            ]
+            _determine_changed_audited_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+        diff_argv = run.call_args_list[1].args[0]
+        self.assertIn("--diff-filter=ACDMR", diff_argv)
+
     def test_a_broken_config_fails_the_pr_that_introduces_it(self):
         # The point of widening: zizmor rejects the malformed config, and
         # that surfaces as a failed run on the PR that wrote it, rather
@@ -314,6 +335,62 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
             exit_code = main(["--scan-mode", "changed", "--source-dir", "."])
         self.assertEqual(exit_code, 2)
         run_zizmor.assert_called_once()
+
+
+class ConfigDeletionAgainstRealGitTest(unittest.TestCase):
+    """Deleting a config must reach the trigger through a real git diff.
+
+    The mocked tests above feed the diff output in directly, so they
+    can't tell an added config from a deleted one -- that distinction is
+    made by `git diff`'s own `--diff-filter`, which is what this
+    exercises end to end.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._repo = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "scanner@example.invalid")
+        self._git("config", "user.name", "Scanner Test")
+        (self._repo / ".github").mkdir()
+        (self._repo / ".github" / "zizmor.yml").write_text(
+            "rules: {}\n", encoding="utf-8"
+        )
+        (self._repo / "README.md").write_text("# fixture\n", encoding="utf-8")
+        self._git("add", "-A")
+        self._git("commit", "-qm", "seed")
+        self._base = self._git("rev-parse", "HEAD").strip()
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self._repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    def _changed_after_commit(self) -> list[Path] | None:
+        head = self._git("rev-parse", "HEAD").strip()
+        return _determine_changed_audited_files(
+            event_name="push",
+            event={"before": self._base, "after": head},
+            scan_path=self._repo,
+            checkout_root=self._repo,
+        )
+
+    def test_deleting_the_config_widens_the_scan(self):
+        # Deleting the config hands the repository back to the default
+        # here, so every workflow is now audited under different rules.
+        (self._repo / ".github" / "zizmor.yml").unlink()
+        self._git("commit", "-qam", "drop the zizmor config")
+        self.assertIsNone(self._changed_after_commit())
+
+    def test_deleting_an_unrelated_file_does_not_widen(self):
+        (self._repo / "README.md").unlink()
+        self._git("commit", "-qam", "drop the readme")
+        self.assertEqual(self._changed_after_commit(), [])
 
 
 class DetermineChangedAuditedFilesTest(unittest.TestCase):

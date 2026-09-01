@@ -344,6 +344,34 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
     def test_unrelated_files_do_not_widen_the_scan(self):
         self.assertEqual(self._changed("README.md\ndocs/trivy.yaml\n"), [])
 
+    def test_deleting_a_config_or_ignore_file_widens_the_scan(self):
+        # Deleting either switches the repository back to the default
+        # config, which changes what counts as a finding everywhere. Git
+        # only reports deletions when D is in --diff-filter, so this also
+        # guards that flag.
+        for config in ("trivy.yaml", ".trivyignore"):
+            with self.subTest(config=config):
+                self.assertIsNone(self._changed(f"{config}\n"))
+
+    def test_the_diff_asks_git_for_deletions(self):
+        with mock.patch("trivy.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="", stderr=""),
+            ]
+            _determine_changed_audited_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+        diff_argv = run.call_args_list[1].args[0]
+        self.assertIn("--diff-filter=ACDMR", diff_argv)
+
+    def test_a_deleted_manifest_is_not_scanned(self):
+        # D widens the diff, so the filter now sees paths that no longer
+        # exist; they must not reach trivy as scan targets.
+        self.assertEqual(self._changed("deleted/requirements.txt\n"), [])
+
     def test_a_broken_config_fails_the_pr_that_introduces_it(self):
         # The point of widening: trivy rejects the malformed config, and
         # that surfaces as a failed run on the PR that wrote it, rather

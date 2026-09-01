@@ -372,7 +372,12 @@ def _determine_changed_python_files(
                 "git",
                 "diff",
                 "--name-only",
-                "--diff-filter=ACMR",
+                # D is here for the config check below: deleting a config
+                # switches the whole repository back to the default one,
+                # which is as much a config change as editing it. Deleted
+                # Python files reaching the filter is harmless, since the
+                # is_file() check below drops paths that no longer exist.
+                "--diff-filter=ACDMR",
                 f"{base_sha}..{head_sha}",
             ],
             cwd=checkout_root,
