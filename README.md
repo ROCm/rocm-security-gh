@@ -62,18 +62,28 @@ falls back to the copy in this repository when it ships none. The scan
 log names the file that was used, so it is always visible in the check
 which one won:
 
-| Scanner  | Read from the scanned repository                     | Default here    |
-| -------- | ---------------------------------------------------- | --------------- |
-| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, `.gitleaksignore` | `gitleaks.toml` |
-| zizmor   | `zizmor.yml`, `.github/zizmor.yml`                   | `zizmor.yml`    |
-| bandit   | `bandit.yaml`, `bandit.yml`                          | `bandit.yaml`   |
-| trivy    | `trivy.yaml`, `trivy.yml`, `.trivyignore`            | `trivy.yaml`    |
+| Scanner  | Read from the scanned repository, first match wins                       | Default here    |
+| -------- | ------------------------------------------------------------------------ | --------------- |
+| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `gitleaks.toml` |
+| zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `zizmor.yml`    |
+| bandit   | `bandit.yaml`, `bandit.yml`                                              | `bandit.yaml`   |
+| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `trivy.yaml`    |
+
+Each scanner's candidates are listed in the order that scanner itself
+searches, so the file CI reads is the one a local run of the same tool
+would read.
 
 This covers detection: allowlists, excluded paths, per-rule
 suppressions, and the fingerprints of findings already triaged. It does
 not cover which scanners run or which severity fails the build, which
 stay in code here for exactly that reason -- a config file cannot switch
 a scanner off, only describe the repository it is scanning.
+
+A PR that touches one of these files is scanned in full rather than
+against its changed files alone, since a config change applies to the
+whole repository. That is what makes a suppression visible in the run
+that adds it, and a broken config fail the PR that wrote it instead of
+the next unrelated one.
 
 A repository that tunes detection this way owns the consequences: an
 allowlist wide enough to hide real findings will hide them. Prefer the

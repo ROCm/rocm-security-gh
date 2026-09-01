@@ -234,6 +234,71 @@ class DiffRangeTest(unittest.TestCase):
         self.assertIsNone(_diff_range("workflow_dispatch", {}))
 
 
+class ConfigChangeWidensTheScanTest(unittest.TestCase):
+    """A PR that only edits the bandit config must still exercise it."""
+
+    def setUp(self):
+        self._original_cwd = Path.cwd()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.chdir(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.chdir, self._original_cwd)
+
+    def _changed(self, diff_output: str):
+        with mock.patch("bandit.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout=diff_output, stderr=""),
+            ]
+            return _determine_changed_python_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+
+    def test_config_only_change_scans_the_whole_tree(self):
+        # The changed-file filter keeps only .py/.pyw, so a config-only
+        # PR would otherwise be filtered to an empty set and pass without
+        # the new config ever reaching bandit.
+        for config in ("bandit.yaml", "bandit.yml"):
+            with self.subTest(config=config):
+                self.assertIsNone(self._changed(f"{config}\n"))
+
+    def test_config_change_alongside_other_files_still_widens(self):
+        self.assertIsNone(self._changed("README.md\nbandit.yaml\n"))
+
+    def test_unrelated_yaml_does_not_widen_the_scan(self):
+        self.assertEqual(self._changed("docs/bandit.yaml\nREADME.md\n"), [])
+
+    def test_a_broken_config_fails_the_pr_that_introduces_it(self):
+        # The point of widening: bandit rejects the malformed config, and
+        # that surfaces as a failed run on the PR that wrote it, rather
+        # than a green no-op that defers the breakage to someone else.
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+            mock.patch(
+                "bandit.gha_load_github_event",
+                return_value={"before": "abc", "after": "def"},
+            ),
+            mock.patch("bandit.gha_append_step_summary"),
+            mock.patch("bandit.gha_set_output"),
+            mock.patch("bandit._resolve_config_path", return_value="bandit.yaml"),
+            mock.patch("bandit.subprocess.run") as run,
+            mock.patch("bandit.get_bandit_binary", return_value=Path("bandit")),
+            mock.patch(
+                "bandit._run_bandit",
+                side_effect=RuntimeError("bandit: error: invalid config"),
+            ) as run_bandit,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="bandit.yaml\n", stderr=""),
+            ]
+            exit_code = main(["--scan-mode", "changed", "--source-dir", "."])
+        self.assertEqual(exit_code, 2)
+        run_bandit.assert_called_once()
+
+
 class DetermineChangedPythonFilesTest(unittest.TestCase):
     """Tests for `_determine_changed_python_files`."""
 

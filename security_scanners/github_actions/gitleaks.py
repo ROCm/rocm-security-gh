@@ -70,6 +70,13 @@ _GITLEAKS_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.c
 _CONFIG_PATH = "gitleaks.toml"
 # Where a scanned repository is allowed to keep its own config, in the
 # order gitleaks itself would look for one.
+#
+# Unlike the other scanners, a config-only change needs no special
+# handling here: gitleaks always runs over the commit range rather than
+# a filtered file list, so a new config is always parsed and exercised,
+# and a malformed one always fails the PR that introduced it. Only a
+# suppression aimed at a finding older than the range goes unverified
+# until the next full-history run.
 _CONFIG_CANDIDATES: tuple[str, ...] = ("gitleaks.toml", ".gitleaks.toml")
 # Fingerprint suppressions for findings a repository has already triaged.
 _IGNORE_FILENAME = ".gitleaksignore"

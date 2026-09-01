@@ -245,6 +245,77 @@ class IsAuditedPathTest(unittest.TestCase):
         self.assertFalse(_is_audited_path("deeply/nested/dir/action.yml.bak"))
 
 
+class ConfigChangeWidensTheScanTest(unittest.TestCase):
+    """A PR that only edits the zizmor config must still exercise it."""
+
+    def setUp(self):
+        self._original_cwd = Path.cwd()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.chdir(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.chdir, self._original_cwd)
+
+    def _changed(self, diff_output: str):
+        with mock.patch("zizmor.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout=diff_output, stderr=""),
+            ]
+            return _determine_changed_audited_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+
+    def test_every_discovery_location_widens_the_scan(self):
+        # The changed-file filter keeps only workflow/action/dependabot
+        # files, so a config-only PR would otherwise be filtered to an
+        # empty set and pass without the new config reaching zizmor.
+        for config in (
+            ".github/zizmor.yml",
+            ".github/zizmor.yaml",
+            "zizmor.yml",
+            "zizmor.yaml",
+        ):
+            with self.subTest(config=config):
+                self.assertIsNone(self._changed(f"{config}\n"))
+
+    def test_config_change_alongside_other_files_still_widens(self):
+        self.assertIsNone(self._changed("README.md\nzizmor.yml\n"))
+
+    def test_a_workflow_named_like_the_config_does_not_widen(self):
+        # .github/workflows/zizmor.yml is a workflow, not the config.
+        self.assertEqual(self._changed(".github/workflows/zizmor.yml\n"), [])
+
+    def test_a_broken_config_fails_the_pr_that_introduces_it(self):
+        # The point of widening: zizmor rejects the malformed config, and
+        # that surfaces as a failed run on the PR that wrote it, rather
+        # than a green no-op that defers the breakage to someone else.
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+            mock.patch(
+                "zizmor.gha_load_github_event",
+                return_value={"before": "abc", "after": "def"},
+            ),
+            mock.patch("zizmor.gha_append_step_summary"),
+            mock.patch("zizmor.gha_set_output"),
+            mock.patch("zizmor._resolve_config_path", return_value="zizmor.yml"),
+            mock.patch("zizmor.subprocess.run") as run,
+            mock.patch("zizmor.get_zizmor_binary", return_value=Path("zizmor")),
+            mock.patch(
+                "zizmor._run_zizmor",
+                side_effect=RuntimeError("zizmor: invalid configuration"),
+            ) as run_zizmor,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="zizmor.yml\n", stderr=""),
+            ]
+            exit_code = main(["--scan-mode", "changed", "--source-dir", "."])
+        self.assertEqual(exit_code, 2)
+        run_zizmor.assert_called_once()
+
+
 class DetermineChangedAuditedFilesTest(unittest.TestCase):
     """Tests for `_determine_changed_audited_files`."""
 

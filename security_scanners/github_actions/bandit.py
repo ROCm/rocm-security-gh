@@ -46,7 +46,10 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
-from security_scanners.utils.scanner_config import resolve_scanner_config
+from security_scanners.utils.scanner_config import (
+    find_config_change,
+    resolve_scanner_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -344,8 +347,8 @@ def _determine_changed_python_files(
 
     Semantics:
 
-    * `None` — no usable diff range; caller should fall back to a full
-      recursive scan of `scan_path`.
+    * `None` — no usable diff range, or the bandit config itself changed;
+      caller should fall back to a full recursive scan of `scan_path`.
     * `[]` — diff range was usable but contained no Python files under
       `scan_path`; caller should treat this as a clean no-op.
     * `[paths…]` — exact set of files for bandit to scan.
@@ -387,9 +390,19 @@ def _determine_changed_python_files(
         )
         return None
 
+    changed = result.stdout.splitlines()
+    config_change = find_config_change(changed, filenames=_CONFIG_CANDIDATES)
+    if config_change is not None:
+        log.info(
+            "Changed config (%s) applies to every file, so this run scans "
+            "the whole tree instead of the changed files alone",
+            config_change,
+        )
+        return None
+
     scan_root = scan_path.resolve()
     files: list[Path] = []
-    for raw in result.stdout.splitlines():
+    for raw in changed:
         relpath = raw.strip()
         if not relpath.endswith(_PYTHON_EXTENSIONS):
             continue

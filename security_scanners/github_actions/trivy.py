@@ -57,6 +57,7 @@ from security_scanners.utils.github_actions_api import (
     gha_set_output,
 )
 from security_scanners.utils.scanner_config import (
+    find_config_change,
     resolve_ignore_file,
     resolve_scanner_config,
 )
@@ -153,10 +154,11 @@ _AUDITED_PATTERNS: tuple[str, ...] = (
     "**/*.tf",
     "**/*.tfvars",
     "**/*.tf.json",
-    # The trivy config itself, so config-only PRs still trigger a run.
-    "trivy.yaml",
-    "trivy.yml",
 )
+# Config-only PRs widen the run to a full scan instead (see
+# _determine_changed_audited_files), so a new config or suppression is
+# exercised by the PR that introduces it.
+_CONFIG_TRIGGERS: tuple[str, ...] = (*_CONFIG_CANDIDATES, _IGNORE_FILENAME)
 
 
 @dataclass(frozen=True)
@@ -440,9 +442,19 @@ def _determine_changed_audited_files(
         )
         return None
 
+    changed = result.stdout.splitlines()
+    config_change = find_config_change(changed, filenames=_CONFIG_TRIGGERS)
+    if config_change is not None:
+        log.info(
+            "Changed config (%s) applies to every file, so this run scans "
+            "the whole tree instead of the changed files alone",
+            config_change,
+        )
+        return None
+
     scan_root = scan_path.resolve()
     files: list[Path] = []
-    for raw in result.stdout.splitlines():
+    for raw in changed:
         relpath = raw.strip()
         if not relpath or not _is_audited_path(relpath):
             continue

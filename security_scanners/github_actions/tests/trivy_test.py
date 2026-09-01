@@ -295,14 +295,82 @@ class IsAuditedPathTest(unittest.TestCase):
         self.assertTrue(_is_audited_path("docker/Dockerfile.prod"))
         self.assertTrue(_is_audited_path("infra/main.tf"))
 
-    def test_matches_trivy_config_itself(self):
-        self.assertTrue(_is_audited_path("trivy.yaml"))
-        self.assertTrue(_is_audited_path("trivy.yml"))
+    def test_config_files_are_not_part_of_the_filter(self):
+        # A config change widens the run to a full scan instead of being
+        # filtered in as though it were a manifest, so that a changed
+        # .trivyignore counts too. See ConfigChangeWidensTheScanTest.
+        self.assertFalse(_is_audited_path("trivy.yaml"))
+        self.assertFalse(_is_audited_path(".trivyignore"))
 
     def test_rejects_unrelated_files(self):
         self.assertFalse(_is_audited_path("README.md"))
         self.assertFalse(_is_audited_path("src/main.py"))
         self.assertFalse(_is_audited_path(".github/workflows/ci.yml"))
+
+
+class ConfigChangeWidensTheScanTest(unittest.TestCase):
+    """A PR that only edits trivy's config or ignore file must exercise it."""
+
+    def setUp(self):
+        self._original_cwd = Path.cwd()
+        self._tmp = tempfile.TemporaryDirectory()
+        os.chdir(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(os.chdir, self._original_cwd)
+
+    def _changed(self, diff_output: str):
+        with mock.patch("trivy.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout=diff_output, stderr=""),
+            ]
+            return _determine_changed_audited_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+            )
+
+    def test_config_and_ignore_file_changes_widen_the_scan(self):
+        # .trivyignore in particular was invisible to the manifest/IaC
+        # filter, so suppressing a CVE could land without a single scan
+        # confirming what it suppressed.
+        for config in ("trivy.yaml", "trivy.yml", ".trivyignore"):
+            with self.subTest(config=config):
+                self.assertIsNone(self._changed(f"{config}\n"))
+
+    def test_config_change_alongside_other_files_still_widens(self):
+        self.assertIsNone(self._changed("README.md\n.trivyignore\n"))
+
+    def test_unrelated_files_do_not_widen_the_scan(self):
+        self.assertEqual(self._changed("README.md\ndocs/trivy.yaml\n"), [])
+
+    def test_a_broken_config_fails_the_pr_that_introduces_it(self):
+        # The point of widening: trivy rejects the malformed config, and
+        # that surfaces as a failed run on the PR that wrote it, rather
+        # than a green no-op that defers the breakage to someone else.
+        with (
+            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+            mock.patch(
+                "trivy.gha_load_github_event",
+                return_value={"before": "abc", "after": "def"},
+            ),
+            mock.patch("trivy.gha_append_step_summary"),
+            mock.patch("trivy.gha_set_output"),
+            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+            mock.patch("trivy.subprocess.run") as run,
+            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+            mock.patch(
+                "trivy._run_trivy",
+                side_effect=RuntimeError("trivy: failed to parse config"),
+            ) as run_trivy,
+        ):
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout="trivy.yaml\n", stderr=""),
+            ]
+            exit_code = main(["--scan-mode", "changed", "--source-dir", "."])
+        self.assertEqual(exit_code, 2)
+        run_trivy.assert_called_once()
 
 
 class DetermineChangedAuditedFilesTest(unittest.TestCase):

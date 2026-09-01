@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from security_scanners.utils.scanner_config import (
+    find_config_change,
     resolve_ignore_file,
     resolve_scanner_config,
 )
@@ -77,6 +78,36 @@ class ResolveScannerConfigTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as ctx:
             self._resolve()
         self.assertIn(str(self._fallback), str(ctx.exception))
+
+
+class FindConfigChangeTest(unittest.TestCase):
+    """Tests for `find_config_change`."""
+
+    FILENAMES = (".github/tool.yml", "tool.yml", ".toolignore")
+
+    def _find(self, *changed: str) -> str | None:
+        return find_config_change(changed, filenames=self.FILENAMES)
+
+    def test_no_config_in_the_diff(self):
+        self.assertIsNone(self._find("src/main.py", "README.md"))
+
+    def test_finds_a_root_config(self):
+        self.assertEqual(self._find("README.md", "tool.yml"), "tool.yml")
+
+    def test_finds_a_nested_config(self):
+        self.assertEqual(self._find(".github/tool.yml"), ".github/tool.yml")
+
+    def test_finds_an_ignore_file(self):
+        self.assertEqual(self._find(".toolignore"), ".toolignore")
+
+    def test_same_name_in_a_subdirectory_does_not_count(self):
+        # Only the repository root (and the exact nested paths listed)
+        # hold a config the scanner will read; a fixture or doc copy
+        # deeper in the tree is just another file.
+        self.assertIsNone(self._find("docs/tool.yml", "tests/fixtures/.toolignore"))
+
+    def test_trailing_whitespace_from_git_output_is_ignored(self):
+        self.assertEqual(self._find("tool.yml\n"), "tool.yml")
 
 
 class ResolveIgnoreFileTest(unittest.TestCase):

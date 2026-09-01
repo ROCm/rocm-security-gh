@@ -17,7 +17,7 @@ so a config file can't opt out of them.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,6 +69,29 @@ def resolve_scanner_config(
         ", ".join(candidates),
     )
     return ResolvedConfig(path=fallback, from_scan_target=False)
+
+
+def find_config_change(
+    changed_paths: Iterable[str], *, filenames: Sequence[str]
+) -> str | None:
+    """Return the first changed path that is one of `filenames`, if any.
+
+    A scanner's changed-file filter keeps only the files that scanner
+    audits, which never includes its own config: a PR that edits nothing
+    else would be filtered down to an empty set and pass without the new
+    config ever reaching the tool. Config changes affect every file, so
+    callers use this to widen such a run into a full scan -- which also
+    means a malformed config fails the PR that introduced it rather than
+    the next unrelated one.
+    """
+    # `git diff --name-only` prints repository-root-relative POSIX paths
+    # on every platform, so these compare as plain strings.
+    wanted = set(filenames)
+    for raw in changed_paths:
+        relpath = raw.strip()
+        if relpath in wanted:
+            return relpath
+    return None
 
 
 def resolve_ignore_file(

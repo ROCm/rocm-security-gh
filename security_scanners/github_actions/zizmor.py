@@ -42,7 +42,10 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
-from security_scanners.utils.scanner_config import resolve_scanner_config
+from security_scanners.utils.scanner_config import (
+    find_config_change,
+    resolve_scanner_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -72,9 +75,17 @@ _ZIZMOR_VERSION = "1.24.1"
 _ZIZMOR_TARBALL_FILENAME = "zizmor-x86_64-unknown-linux-gnu.tar.gz"
 _ZIZMOR_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_ZIZMOR_TARBALL_FILENAME}"
 _CONFIG_PATH = "zizmor.yml"
-# Where a scanned repository is allowed to keep its own config, in the
-# order zizmor itself would look for one.
-_CONFIG_CANDIDATES: tuple[str, ...] = ("zizmor.yml", ".github/zizmor.yml")
+# Where a scanned repository is allowed to keep its own config, in
+# zizmor's own discovery order: .github before the repository root, .yml
+# before .yaml (both spellings since v1.19.0). Passing --config disables
+# zizmor's discovery, so this order is what keeps a local `zizmor .` run
+# and CI reading the same file.
+_CONFIG_CANDIDATES: tuple[str, ...] = (
+    ".github/zizmor.yml",
+    ".github/zizmor.yaml",
+    "zizmor.yml",
+    "zizmor.yaml",
+)
 # Ascending severity order; threshold comparisons rely on it.
 _SEVERITY_ORDER: tuple[str, ...] = ("INFORMATIONAL", "LOW", "MEDIUM", "HIGH")
 _SEVERITY_CHOICES: tuple[str, ...] = tuple(s.lower() for s in _SEVERITY_ORDER)
@@ -350,9 +361,19 @@ def _determine_changed_audited_files(
         )
         return None
 
+    changed = result.stdout.splitlines()
+    config_change = find_config_change(changed, filenames=_CONFIG_CANDIDATES)
+    if config_change is not None:
+        log.info(
+            "Changed config (%s) applies to every workflow, so this run "
+            "audits the whole tree instead of the changed files alone",
+            config_change,
+        )
+        return None
+
     scan_root = scan_path.resolve()
     files: list[Path] = []
-    for raw in result.stdout.splitlines():
+    for raw in changed:
         relpath = raw.strip()
         if not relpath or not _is_audited_path(relpath):
             continue
