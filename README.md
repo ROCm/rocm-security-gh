@@ -157,7 +157,7 @@ every repository -- no per-scanner jobs to add or maintain.
      contents: read
    jobs:
      security:
-       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1.0.0
        with:
          report_formats: human
    ```
@@ -179,7 +179,7 @@ every repository -- no per-scanner jobs to add or maintain.
        permissions:
          contents: read
          security-events: write
-       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@main
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1.0.0
        with:
          scan_mode: all
          report_formats: sarif
@@ -189,7 +189,36 @@ There is no opt-out. If a scanner is wrong for your repository, raise it
 here rather than working around it locally, so the exception is visible
 and reviewed in one place.
 
-Pin `@main` to a tag or commit SHA once these workflows have a release; see
-`.github/workflows/weekly-security-scan.yml` and
-`.github/workflows/pr-security-scan.yml` in this repo for the versions
-used to scan `rocm-security-gh` itself.
+### Versioning
+
+Pin the release tag, as above, rather than `@main`. The tag pins more
+than the workflow file: the baseline checks its own tooling out at the
+commit the caller pinned (via `job.workflow_repository` /
+`job.workflow_sha`), so one tag fixes the scanner scripts, the shared
+scanner configs, the pinned tool versions and their `checksums.sha256`
+digests as a single reviewable bundle. A given tag therefore scans the
+same way today and in six months, which is also what makes a finding
+reproducible after the fact.
+
+Tags are immutable and never moved, so picking up a new baseline is an
+explicit bump in your repository. Enable the `github-actions` ecosystem
+in your `.github/dependabot.yml` and Dependabot will raise that bump as
+a PR, the same way it does for actions:
+
+```yaml
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+```
+
+Security fixes to a scanner reach your repository only once that PR
+merges, so treat these bumps as security updates rather than routine
+dependency noise.
+
+The two workflows in this repository call
+`./.github/workflows/security-baseline.yml` by local path instead, on
+purpose: the repository that develops the baseline scans itself with the
+unreleased tip, so a regression is caught here before it is tagged.
