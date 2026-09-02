@@ -43,6 +43,18 @@ on:
         required: false
         type: string
         default: "."
+      timeout_minutes:
+        description: >-
+          Minimum job timeout for every scanner, in minutes. Defaults to
+          0, which leaves each scanner on the budget this baseline sets
+          for it (20-30 minutes). Raise it for a repository too large to
+          scan in that, a scanner that runs out of time fails its
+          check, so the timeout is a limit on how long a repository is
+          willing to wait, not on what gets reported. Never lowers a
+          scanner below its default.
+        required: false
+        type: number
+        default: 0
 
 jobs:
   plan:
@@ -66,6 +78,8 @@ jobs:
 
       - name: Compute scanner matrix
         id: matrix
+        env:
+          SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: python -m security_scanners.utils.compute_scan_matrix
 
   scan:
