@@ -12,14 +12,6 @@ it out everywhere on the next run.
 Everything a matrix leg needs (the module to run, the runner, the timeout,
 and the name used for the check run, the SARIF category and the report
 artifact) is decided here rather than in YAML.
-
-The one thing a caller can move is the timeout, because a repository the
-size of `rocm-libraries` takes longer to scan than the defaults below
-allow, and a scanner that runs out of time *fails* its check rather than
-passing it -- so unlike a severity threshold, the timeout can't be used
-to make a finding disappear. It only ever moves up: `--timeout-minutes`
-raises a scanner's budget and never lowers it below what the baseline
-considers enough.
 """
 
 import argparse
