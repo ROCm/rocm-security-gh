@@ -12,14 +12,27 @@ it out everywhere on the next run.
 Everything a matrix leg needs (the module to run, the runner, the timeout,
 and the name used for the check run, the SARIF category and the report
 artifact) is decided here rather than in YAML.
+
+The one thing a caller can move is the timeout, because a repository the
+size of `rocm-libraries` takes longer to scan than the defaults below
+allow, and a scanner that runs out of time *fails* its check rather than
+passing it -- so unlike a severity threshold, the timeout can't be used
+to make a finding disappear. It only ever moves up: `--timeout-minutes`
+raises a scanner's budget and never lowers it below what the baseline
+considers enough.
 """
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass
 
 from security_scanners.utils.github_actions_api import gha_set_output
+
+# GitHub cancels a job on a hosted runner after 6 hours, so a larger
+# budget than this is one the runner will never honour.
+MAX_TIMEOUT_MINUTES = 360
 
 
 @dataclass(frozen=True)
@@ -40,6 +53,15 @@ class ScannerSpec:
     module: str
     timeout_minutes: int
     runner: str = "ubuntu-24.04"
+
+    def budget(self, requested_minutes: int) -> int:
+        """Return this scanner's timeout, honouring a caller's request.
+
+        The caller's number is a floor raise, not a replacement: a
+        repository knows it is large, but not that a scanner needs less
+        room than the baseline gives it.
+        """
+        return max(self.timeout_minutes, requested_minutes)
 
 
 SCANNERS: tuple[ScannerSpec, ...] = (
@@ -66,14 +88,14 @@ SCANNERS: tuple[ScannerSpec, ...] = (
 )
 
 
-def build_matrix(specs: tuple[ScannerSpec, ...]) -> str:
+def build_matrix(specs: tuple[ScannerSpec, ...], timeout_minutes: int = 0) -> str:
     """Render specs as the JSON `strategy.matrix.include` list."""
     return json.dumps(
         [
             {
                 "scanner": spec.name,
                 "module": spec.module,
-                "timeout_minutes": spec.timeout_minutes,
+                "timeout_minutes": spec.budget(timeout_minutes),
                 "runner": spec.runner,
             }
             for spec in specs
@@ -82,14 +104,48 @@ def build_matrix(specs: tuple[ScannerSpec, ...]) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--timeout-minutes",
+        type=int,
+        default=os.environ.get("SCANNER_TIMEOUT_MINUTES") or 0,
+        help=(
+            "Minimum job timeout for every scanner, in minutes. 0 (the "
+            "default) leaves each scanner on its own budget. A larger "
+            "number raises any scanner whose budget is smaller, for "
+            "repositories too large to scan in it. Maximum "
+            f"{MAX_TIMEOUT_MINUTES} (GitHub cancels the job there anyway)."
+        ),
+    )
+    return parser
 
 
 def main(argv: list[str]) -> int:
-    build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
-    matrix = build_matrix(SCANNERS)
-    print(f"Scanners: {', '.join(spec.name for spec in SCANNERS)}")
+    requested = args.timeout_minutes
+    if requested < 0 or requested > MAX_TIMEOUT_MINUTES:
+        parser.error(
+            f"--timeout-minutes must be between 0 and {MAX_TIMEOUT_MINUTES}, "
+            f"got {requested}"
+        )
+
+    matrix = build_matrix(SCANNERS, requested)
+    print(
+        "Scanners: "
+        + ", ".join(f"{spec.name} ({spec.budget(requested)}m)" for spec in SCANNERS)
+    )
+    raised = [
+        spec for spec in SCANNERS if spec.budget(requested) > spec.timeout_minutes
+    ]
+    if raised:
+        print(
+            f"Caller raised the timeout to {requested}m for: "
+            + ", ".join(
+                f"{spec.name} (default {spec.timeout_minutes}m)" for spec in raised
+            )
+        )
     print(f"matrix = {matrix}")
     gha_set_output({"matrix": matrix})
     return 0

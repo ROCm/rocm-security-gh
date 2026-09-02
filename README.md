@@ -46,9 +46,19 @@ to one isolated job per scanner, which means:
   for `report_formats: human` and every scanner produces whatever its
   reviewer-readable format happens to be called.
 
-Inputs, all optional, describe the calling event and who reads the
-output: `scan_mode`, `report_formats` and `scan_path`. The input
+Inputs, all optional, describe the calling event, who reads the output
+and how long the repository is willing to wait: `scan_mode`,
+`report_formats`, `scan_path` and `timeout_minutes`. The input
 descriptions in the workflow file are the authoritative reference.
+
+`timeout_minutes` is the one input that moves a scanner's own budget,
+and it only ever moves it up. Each scanner gets 20 to 30 minutes here,
+which a repository the size of `rocm-libraries` can outgrow; passing a
+larger number raises every scanner below it, and a smaller one is
+ignored. It isn't a policy lever in the way a severity threshold would
+be: a scanner that runs out of time fails its check rather than passing
+it, so waiting less can never turn a finding into a green run. The
+ceiling is 360, where GitHub cancels the job regardless.
 
 To change policy, edit this repository: `SCANNERS` in
 `security_scanners/utils/compute_scan_matrix.py` decides which scanners
@@ -225,6 +235,11 @@ every repository -- no per-scanner jobs to add or maintain.
          scan_mode: all
          report_formats: sarif
    ```
+
+   A `scan_mode: all` run over a large repository is where the default
+   per-scanner budget runs out first -- gitleaks walks the entire commit
+   history. Add `timeout_minutes:` here if a scanner starts being
+   cancelled rather than finishing.
 
 There is no opt-out from a scanner or its severity threshold. Tuning
 what it reports is a different matter: ship the config file your scanner
