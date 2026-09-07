@@ -405,9 +405,7 @@ class ChangedModeRestrictionTest(unittest.TestCase):
             paths=("Cargo.toml", "src/lib.rs"),
             path_source="exact-tree",
         )
-        plan = build_plan(
-            discovery, restrict_to=ChangedFiles(paths=("src/lib.rs",))
-        )
+        plan = build_plan(discovery, restrict_to=ChangedFiles(paths=("src/lib.rs",)))
         self.assertEqual(plan.selected, ("rust",))
 
     def test_an_incomplete_file_list_narrows_nothing(self):
@@ -766,9 +764,7 @@ class MainTest(unittest.TestCase):
             tree=_tree(["src/a.cpp", "tools/b.py"]),
         )
         self.assertEqual(self._run(api), 0)
-        self.assertEqual(
-            self._outputs()["selected_languages"], "actions,c-cpp,python"
-        )
+        self.assertEqual(self._outputs()["selected_languages"], "actions,c-cpp,python")
 
     def test_takes_no_arguments_so_callers_cannot_select_languages(self):
         with mock.patch.dict(os.environ, self._env, clear=False):
