@@ -23,8 +23,10 @@ than run an unverified artifact.
 ## Scanners
 
 `.github/workflows/security-baseline.yml` is the single `workflow_call`
-entry point every ROCm repository calls. One job in the caller fans out
-to one isolated job per scanner, which means:
+entry point every ROCm repository calls -- the one other `workflow_call`
+workflow here, `codeql.yml`, is called by the baseline rather than by
+repositories. One job in the caller fans out to one isolated job per
+scanner, which means:
 
 - **What runs is org policy, not a repository setting.** Which scanners
   run and the severity that fails them are not inputs. A repository
@@ -52,7 +54,8 @@ and how long the repository is willing to wait: `scan_mode`,
 descriptions in the workflow file are the authoritative reference.
 
 `timeout_minutes` is the one input that moves a scanner's own budget,
-and it only ever moves it up. Each scanner gets 20 to 30 minutes here,
+and it only ever moves it up. Each scanner gets 20 to 30 minutes here
+(120 for each CodeQL language),
 which a repository the size of `rocm-libraries` can outgrow; passing a
 larger number raises every scanner below it, and a smaller one is
 ignored. It isn't a policy lever in the way a severity threshold would
@@ -63,7 +66,11 @@ ceiling is 360, where GitHub cancels the job regardless.
 To change policy, edit this repository: `SCANNERS` in
 `security_scanners/utils/compute_scan_matrix.py` decides which scanners
 run, and each scanner script's own defaults decide the severity that
-fails it and how sensitively it reports.
+fails it and how sensitively it reports. CodeQL is the exception to the
+"one job per scanner" shape -- it runs as GitHub's own action rather
+than a script here, so it gets a planning job that discovers the
+caller's languages and one analysis job per language. See
+[CodeQL](#codeql).
 
 ### Per-repository configuration
 
@@ -174,6 +181,39 @@ against its own regularly updated vulnerability and policy databases.
   finding. Runs trivy's `misconfig` and `vuln` scanners; `secret` is
   deliberately left out because gitleaks already covers secret detection.
 
+### CodeQL
+
+[CodeQL](https://codeql.github.com/) is GitHub's own analysis engine. It
+builds a database of the repository and runs queries over it, so unlike
+the four scanners above it reasons about data flow -- a value reaching a
+dangerous sink several functions away from where it entered.
+
+- Defined in `.github/workflows/codeql.yml`, which `security-baseline.yml`
+  calls. Callers don't reference it directly: the baseline stays the one
+  entry point, and calling it with `$/` means the version of it that runs
+  is the version of the baseline the caller pinned.
+- Check runs: `codeql / <language>`, one per language, plus
+  `codeql / complete`, which reports the outcome of all of them. Require
+  that one in branch protection: which per-language checks exist depends
+  on what the repository is written in and, on a pull request, on what it
+  touched.
+- `scan_mode: changed` narrows which languages run to the ones the pull
+  request touched.
+
+**Languages are discovered per run, never configured.** A hard-coded
+language list is wrong as soon as a repository grows a language, and
+wrong in the other direction too: CodeQL fails with "No source code was
+seen during the build" when it is initialised for a language the
+repository doesn't have. So
+`security_scanners/utils/compute_codeql_matrix.py` asks the GitHub API
+what the repository is written in and emits one job per answer, reading
+two sources because neither is enough alone:
+
+| Source                                                  | What it knows                                                                          | Where it falls short                                                                        |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /repos/{owner}/{repo}/languages`                   | Linguist's view of the default branch, the same signal GitHub's own default setup uses | Refreshes only after a default-branch push, so a PR that adds a language is invisible to it |
+| `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` | Every file in the exact commit under scan                                              | GitHub truncates it past 100,000 entries or 7 MB                                            |
+
 ## Consuming these workflows from another repo
 
 ### Split scanning strategy
@@ -279,6 +319,11 @@ merges, so treat these bumps as security updates rather than routine
 dependency noise.
 
 The two workflows in this repository call
-`./.github/workflows/security-baseline.yml` by local path instead, on
-purpose: the repository that develops the baseline scans itself with the
-unreleased tip, so a regression is caught here before it is tagged.
+`$/.github/workflows/security-baseline.yml` unpinned instead, on purpose:
+the repository that develops the baseline scans itself with the
+unreleased tip, so a regression is caught here before it is tagged. `$/`
+is [GitHub's self-repository
+syntax](https://github.blog/changelog/2026-07-30-reference-same-repository-actions-with-self-repository-syntax/),
+which resolves to this repository at the running commit -- the same
+reason the baseline uses it to call `codeql.yml`. It needs Actions runner
+2.336.0 or newer and is not available on GitHub Enterprise Server.

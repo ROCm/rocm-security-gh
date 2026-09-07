@@ -23,7 +23,7 @@ jobs:
     permissions:
       contents: read
       security-events: write
-    uses: ./.github/workflows/security-baseline.yml
+    uses: $/.github/workflows/security-baseline.yml
     with:
       scan_mode: all
       report_formats: sarif

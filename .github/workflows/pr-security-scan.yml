@@ -22,6 +22,6 @@ concurrency:
 
 jobs:
   security:
-    uses: ./.github/workflows/security-baseline.yml
+    uses: $/.github/workflows/security-baseline.yml
     with:
       report_formats: human
