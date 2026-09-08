@@ -1,43 +1,74 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
+# CodeQL for whichever repository called the security baseline, with the
+# language matrix discovered per run rather than configured.
+
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '**/*.py'
-      - '.github/**'
-  pull_request:
-    branches: [main]
-    paths:
-      - '**/*.py'
-      - '.github/**'
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
+    inputs:
+      scan_mode:
+        description: >-
+          'changed' (default) analyses only the languages the calling
+          pull request touched; 'all' analyses every language the
+          repository is written in. CodeQL builds a database of the
+          whole repository either way -- it cannot analyse a file list
+          -- so this narrows which languages run, not which files.
+        required: false
+        type: string
+        default: changed
+      timeout_minutes:
+        description: >-
+          Minimum job timeout for each language, in minutes. Defaults to
+          0, which leaves each CodeQL job on the 120 minutes this
+          baseline gives it. Never lowers it.
+        required: false
+        type: number
+        default: 0
 
 jobs:
-  analyze:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    name: Analyze (${{ matrix.language }})
+  plan:
+    name: Plan languages
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      security-events: write
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.codeql.outputs.matrix }}
+      enabled: ${{ steps.codeql.outputs.enabled }}
+      selected_languages: ${{ steps.codeql.outputs.selected_languages }}
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Discover CodeQL languages
+        id: codeql
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
+          SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        run: python -m security_scanners.utils.compute_codeql_matrix
+
+  analyze:
+    name: ${{ matrix.language }}
+    needs: plan
+    if: needs.plan.outputs.enabled == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout_minutes }}
     strategy:
       fail-fast: false
-      matrix:
-        language: [python, actions]
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
-      - name: Checkout repository
+      - name: Checkout scan target
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -46,9 +77,34 @@ jobs:
         uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           languages: ${{ matrix.language }}
+          build-mode: none
           queries: security-extended
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: "/language:${{ matrix.language }}"
+
+  complete:
+    name: complete
+    needs: [plan, analyze]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report CodeQL outcome
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          ANALYSIS_RESULT: ${{ needs.analyze.result }}
+          LANGUAGES: ${{ needs.plan.outputs.selected_languages }}
+        run: |
+          echo "Language discovery: ${PLAN_RESULT}"
+          echo "Analysis: ${ANALYSIS_RESULT} (${LANGUAGES:-no languages})"
+          if [[ "${PLAN_RESULT}" != "success" ]]; then
+            echo "::error::CodeQL language discovery did not succeed"
+            exit 1
+          fi
+          if [[ "${ANALYSIS_RESULT}" != "success" && "${ANALYSIS_RESULT}" != "skipped" ]]; then
+            echo "::error::CodeQL analysis did not succeed"
+            exit 1
+          fi

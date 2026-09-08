@@ -1,10 +1,11 @@
-# actionlint v1.7.x does not yet model job.workflow_repository /
-# job.workflow_sha (added to GitHub Actions for reusable workflows).
-# See https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
+# actionlint v1.7.x does not yet model two GitHub Actions features this
+# repository relies on. Both ignores are scoped to the exact message, so a
+# genuine mistake in the same position is still reported.
+
 paths:
   # One glob covers every scanner's reusable workflow, so a new scanner
-  # needs no change here. The ignored message is scoped to these two
-  # properties, so a genuine typo in a `job.*` expression is still reported.
+  # needs no change here.
   .github/workflows/*.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined'
+      - 'reusable workflow call "\$/[^"]+" at "uses" is not following the format'
