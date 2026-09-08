@@ -198,7 +198,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     return targets
 
 
-def _resolve_config_path(checkout_root: Path) -> str:
+def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     # The fallback is anchored on REPO_ROOT (this script's own checkout),
     # not the cwd: when this workflow is called from another repo, the cwd
     # holds *that* repo's checkout (the scan target), not
@@ -209,6 +209,7 @@ def _resolve_config_path(checkout_root: Path) -> str:
             checkout_root=checkout_root,
             candidates=_CONFIG_CANDIDATES,
             fallback=REPO_ROOT / _CONFIG_PATH,
+            configured_path=configured_path,
         ).path
     )
 
@@ -597,6 +598,15 @@ def build_parser() -> argparse.ArgumentParser:
             "process's cwd)."
         ),
     )
+    p.add_argument(
+        "--config-path",
+        default=os.environ.get("SCANNER_GITLEAKS_CONFIG_PATH", ""),
+        help=(
+            "Optional gitleaks config path relative to --checkout-root. "
+            "When omitted, conventional root-level names are discovered "
+            "before falling back to the baseline default."
+        ),
+    )
     return p
 
 
@@ -622,7 +632,7 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
-        config_path = _resolve_config_path(checkout_root)
+        config_path = _resolve_config_path(checkout_root, args.config_path)
         ignore_path = resolve_ignore_file(
             scanner="gitleaks",
             checkout_root=checkout_root,

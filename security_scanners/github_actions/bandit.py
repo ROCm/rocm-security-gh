@@ -49,6 +49,7 @@ from security_scanners.utils.github_actions_api import (
 from security_scanners.utils.scanner_config import (
     find_config_change,
     resolve_scanner_config,
+    scanner_config_paths,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -271,7 +272,7 @@ def _parse_report_formats(raw: str) -> list[_ReportTarget]:
     return targets
 
 
-def _resolve_config_path(checkout_root: Path) -> str:
+def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     # The fallback is anchored on REPO_ROOT (this script's own checkout),
     # not the cwd: when this workflow is called from another repo, the cwd
     # holds *that* repo's checkout (the scan target), not
@@ -282,6 +283,7 @@ def _resolve_config_path(checkout_root: Path) -> str:
             checkout_root=checkout_root,
             candidates=_CONFIG_CANDIDATES,
             fallback=REPO_ROOT / _CONFIG_PATH,
+            configured_path=configured_path,
         ).path
     )
 
@@ -342,6 +344,7 @@ def _determine_changed_python_files(
     event: Mapping[str, object],
     scan_path: Path,
     checkout_root: Path = Path("."),
+    config_paths: tuple[str, ...] = _CONFIG_CANDIDATES,
 ) -> list[Path] | None:
     """Return the changed Python source files inside `scan_path`, or `None`.
 
@@ -396,7 +399,7 @@ def _determine_changed_python_files(
         return None
 
     changed = result.stdout.splitlines()
-    config_change = find_config_change(changed, filenames=_CONFIG_CANDIDATES)
+    config_change = find_config_change(changed, filenames=config_paths)
     if config_change is not None:
         log.info(
             "Changed config (%s) applies to every file, so this run scans "
@@ -644,6 +647,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--config-path",
+        default=os.environ.get("SCANNER_BANDIT_CONFIG_PATH", ""),
+        help=(
+            "Optional bandit config path relative to --checkout-root. "
+            "When omitted, conventional root-level names are discovered "
+            "before falling back to the baseline default."
+        ),
+    )
+    p.add_argument(
         "--severity-threshold",
         default=os.environ.get(
             "SCANNER_SEVERITY_THRESHOLD", _DEFAULT_SEVERITY_THRESHOLD
@@ -683,7 +695,12 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
-        config_path = _resolve_config_path(checkout_root)
+        config_paths = scanner_config_paths(
+            checkout_root=checkout_root,
+            configured_path=args.config_path,
+            candidates=_CONFIG_CANDIDATES,
+        )
+        config_path = _resolve_config_path(checkout_root, args.config_path)
         # Only 'changed' mode needs the event payload, to work out the
         # diff range. Loading it unconditionally would make 'all' mode
         # fail on events that have no payload we can parse, even though
@@ -696,6 +713,7 @@ def main(argv: list[str]) -> int:
                 event=gha_load_github_event(),
                 scan_path=source_dir,
                 checkout_root=checkout_root,
+                config_paths=config_paths,
             )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)

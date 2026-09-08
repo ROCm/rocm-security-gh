@@ -464,6 +464,16 @@ class ResolveConfigPathTest(unittest.TestCase):
         target_config.write_text("title = 'dotfile config'", encoding="utf-8")
         self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
 
+    def test_explicit_nested_config_is_honoured(self):
+        self._write_default_config()
+        target_config = self._target_root / "security_tools" / "gitleaks.toml"
+        target_config.parent.mkdir()
+        target_config.write_text("title = 'nested config'", encoding="utf-8")
+        self.assertEqual(
+            _resolve_config_path(self._target_root, "security_tools/gitleaks.toml"),
+            str(target_config),
+        )
+
     def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError) as ctx:
             _resolve_config_path(self._target_root)

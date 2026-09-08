@@ -48,9 +48,10 @@ scanner, which means:
   for `report_formats: human` and every scanner produces whatever its
   reviewer-readable format happens to be called.
 
-Inputs, all optional, describe the calling event, who reads the output
-and how long the repository is willing to wait: `scan_mode`,
-`report_formats`, `scan_path` and `timeout_minutes`. The input
+Inputs, all optional, describe the calling event, who reads the output,
+where repository-specific scanner configs live and how long the
+repository is willing to wait: `scan_mode`, `report_formats`,
+`scan_path`, `<scanner>_config_path` and `timeout_minutes`. The input
 descriptions in the workflow file are the authoritative reference.
 
 `timeout_minutes` is the one input that moves a scanner's own budget,
@@ -90,15 +91,38 @@ Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
 would read.
 
+Repositories that keep scanner configuration in a subdirectory can pass
+an explicit repository-root-relative path for each scanner:
+
+```yaml
+jobs:
+  security:
+    uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@<full commit SHA>
+    with:
+      bandit_config_path: security_tools/bandit.yaml
+      gitleaks_config_path: security_tools/gitleaks.toml
+      trivy_config_path: security_tools/trivy.yaml
+      zizmor_config_path: security_tools/zizmor.yaml
+```
+
+An explicit path is the only location considered for that scanner. It
+must name a file inside the scanned repository: a missing file, absolute
+path, path traversal or symlink outside the checkout fails the scan
+instead of silently selecting the baseline default. Omitting the input
+preserves the conventional-location discovery and fallback in the table
+above.
+
 This covers detection: allowlists, excluded paths, per-rule
 suppressions, and the fingerprints of findings already triaged. It does
 not cover which scanners run or which severity fails the build, which
 stay in code here for exactly that reason -- a config file cannot switch
 a scanner off, only describe the repository it is scanning.
 
-A PR that touches one of these files is scanned in full rather than
-against its changed files alone, since a config change applies to the
-whole repository. That is what makes a suppression visible in the run
+A PR that touches an automatically discovered or explicitly configured
+Bandit, Trivy or zizmor config is scanned in full rather than against its
+changed files alone, since a config change applies to the whole
+repository. Gitleaks already scans the full commit range rather than a
+filtered file list. That is what makes a suppression visible in the run
 that adds it, and a broken config fail the PR that wrote it instead of
 the next unrelated one.
 

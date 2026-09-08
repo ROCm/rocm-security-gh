@@ -43,6 +43,39 @@ on:
         required: false
         type: string
         default: "."
+      bandit_config_path:
+        description: >-
+          Optional path to the repository's bandit YAML config, relative
+          to the repository root. When omitted, conventional root-level
+          names are discovered before the baseline default is used.
+        required: false
+        type: string
+        default: ""
+      gitleaks_config_path:
+        description: >-
+          Optional path to the repository's gitleaks TOML config,
+          relative to the repository root. When omitted, conventional
+          root-level names are discovered before the baseline default is
+          used.
+        required: false
+        type: string
+        default: ""
+      trivy_config_path:
+        description: >-
+          Optional path to the repository's trivy YAML config, relative
+          to the repository root. When omitted, conventional root-level
+          names are discovered before the baseline default is used.
+        required: false
+        type: string
+        default: ""
+      zizmor_config_path:
+        description: >-
+          Optional path to the repository's zizmor YAML config, relative
+          to the repository root. When omitted, conventional names are
+          discovered before the baseline default is used.
+        required: false
+        type: string
+        default: ""
       timeout_minutes:
         description: >-
           Minimum job timeout for every scanner, in minutes. Defaults to
@@ -128,6 +161,10 @@ jobs:
           SCANNER_MODULE: ${{ matrix.module }}
           SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
           SCANNER_REPORT_FORMATS: ${{ inputs.report_formats }}
+          SCANNER_BANDIT_CONFIG_PATH: ${{ inputs.bandit_config_path }}
+          SCANNER_GITLEAKS_CONFIG_PATH: ${{ inputs.gitleaks_config_path }}
+          SCANNER_TRIVY_CONFIG_PATH: ${{ inputs.trivy_config_path }}
+          SCANNER_ZIZMOR_CONFIG_PATH: ${{ inputs.zizmor_config_path }}
           SCANNER_SOURCE_DIR: .scan-target/${{ inputs.scan_path }}
           SCANNER_CHECKOUT_ROOT: .scan-target
         run: python -m "${SCANNER_MODULE}"

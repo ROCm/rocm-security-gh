@@ -38,17 +38,33 @@ def resolve_scanner_config(
     checkout_root: Path,
     candidates: Sequence[str],
     fallback: Path,
+    configured_path: str = "",
 ) -> ResolvedConfig:
-    """Return the scan target's own config, or `fallback` if it has none.
+    """Return the requested config, an automatically found config, or `fallback`.
 
     `candidates` are the conventional locations for this scanner's config,
     relative to `checkout_root` (the scan target's checkout), tried in
     order. `fallback` is this repo's default config, which must exist:
     a missing default means the tooling checkout is broken, not that the
-    scan should quietly run unconfigured.
+    scan should quietly run unconfigured. When `configured_path` is set,
+    it is the only candidate: it must name a file inside `checkout_root`
+    rather than silently falling back after a typo.
     """
-    for candidate in candidates:
-        candidate_path = checkout_root / candidate
+    effective_candidates = scanner_config_paths(
+        checkout_root=checkout_root,
+        configured_path=configured_path,
+        candidates=candidates,
+    )
+    checkout_root_resolved = checkout_root.resolve()
+    for candidate in effective_candidates:
+        candidate_path = (checkout_root_resolved / candidate).resolve()
+        try:
+            candidate_path.relative_to(checkout_root_resolved)
+        except ValueError as exc:
+            raise ValueError(
+                f"{scanner} config path '{candidate}' resolves outside the "
+                "scanned repository"
+            ) from exc
         if candidate_path.is_file():
             log.info(
                 "Using %s config from the scanned repository: %s",
@@ -56,6 +72,12 @@ def resolve_scanner_config(
                 candidate_path,
             )
             return ResolvedConfig(path=candidate_path, from_scan_target=True)
+
+    if configured_path.strip():
+        raise FileNotFoundError(
+            f"{scanner} config path '{effective_candidates[0]}' does not "
+            "exist or is not a file in the scanned repository"
+        )
 
     if not fallback.is_file():
         raise FileNotFoundError(
@@ -66,9 +88,41 @@ def resolve_scanner_config(
         "Using default %s config: %s (the scanned repository ships none of %s)",
         scanner,
         fallback,
-        ", ".join(candidates),
+        ", ".join(effective_candidates),
     )
     return ResolvedConfig(path=fallback, from_scan_target=False)
+
+
+def scanner_config_paths(
+    *,
+    checkout_root: Path,
+    configured_path: str,
+    candidates: Sequence[str],
+) -> tuple[str, ...]:
+    """Return repository-relative config paths used for lookup and diff checks."""
+    raw = configured_path.strip()
+    if not raw:
+        return tuple(candidates)
+
+    supplied = Path(raw)
+    if supplied.is_absolute():
+        raise ValueError(
+            f"config path '{configured_path}' must be relative to the "
+            "scanned repository"
+        )
+
+    checkout_root_resolved = checkout_root.resolve()
+    resolved = (checkout_root_resolved / supplied).resolve()
+    try:
+        relative = resolved.relative_to(checkout_root_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"config path '{configured_path}' resolves outside the "
+            "scanned repository"
+        ) from exc
+    if not relative.parts:
+        raise ValueError(f"config path '{configured_path}' does not name a file")
+    return (relative.as_posix(),)
 
 
 def find_config_change(
