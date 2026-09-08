@@ -267,6 +267,24 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
     def test_config_change_alongside_other_files_still_widens(self):
         self.assertIsNone(self._changed("README.md\nbandit.yaml\n"))
 
+    def test_explicit_nested_config_change_widens(self):
+        with mock.patch("bandit.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(
+                    returncode=0,
+                    stdout="security_tools/bandit.yaml\n",
+                    stderr="",
+                ),
+            ]
+            changed = _determine_changed_python_files(
+                event_name="push",
+                event={"before": "abc", "after": "def"},
+                scan_path=Path("."),
+                config_paths=("security_tools/bandit.yaml",),
+            )
+        self.assertIsNone(changed)
+
     def test_unrelated_yaml_does_not_widen_the_scan(self):
         self.assertEqual(self._changed("docs/bandit.yaml\nREADME.md\n"), [])
 
@@ -580,6 +598,16 @@ class ResolveConfigPathTest(unittest.TestCase):
         target_config = self._target_root / "bandit.yml"
         target_config.write_text("exclude_dirs: []\n", encoding="utf-8")
         self.assertEqual(_resolve_config_path(self._target_root), str(target_config))
+
+    def test_explicit_nested_config_is_honoured(self):
+        self._write_default_config()
+        target_config = self._target_root / "security_tools" / "bandit.yaml"
+        target_config.parent.mkdir()
+        target_config.write_text("exclude_dirs: []\n", encoding="utf-8")
+        self.assertEqual(
+            _resolve_config_path(self._target_root, "security_tools/bandit.yaml"),
+            str(target_config),
+        )
 
     def test_raises_when_neither_the_target_nor_the_default_has_one(self):
         with self.assertRaises(FileNotFoundError):

@@ -9,6 +9,7 @@ from security_scanners.utils.scanner_config import (
     find_config_change,
     resolve_ignore_file,
     resolve_scanner_config,
+    scanner_config_paths,
 )
 
 
@@ -70,6 +71,58 @@ class ResolveScannerConfigTest(unittest.TestCase):
         resolved = self._resolve(candidates=("tool.toml", ".github/tool.toml"))
         self.assertEqual(resolved.path, nested)
 
+    def test_explicit_nested_config_path_wins(self):
+        nested = self._target_root / "security_tools" / "tool.yaml"
+        nested.parent.mkdir()
+        nested.write_text("# repository config\n", encoding="utf-8")
+        conventional = self._target_root / "tool.toml"
+        conventional.write_text("# conventional config\n", encoding="utf-8")
+        resolved = resolve_scanner_config(
+            scanner="tool",
+            checkout_root=self._target_root,
+            candidates=("tool.toml",),
+            fallback=self._fallback,
+            configured_path="security_tools/tool.yaml",
+        )
+        self.assertEqual(resolved.path, nested)
+
+    def test_missing_explicit_config_does_not_fall_back(self):
+        with self.assertRaises(FileNotFoundError) as ctx:
+            resolve_scanner_config(
+                scanner="tool",
+                checkout_root=self._target_root,
+                candidates=("tool.toml",),
+                fallback=self._fallback,
+                configured_path="security_tools/missing.yaml",
+            )
+        self.assertIn("security_tools/missing.yaml", str(ctx.exception))
+
+    def test_explicit_config_must_stay_inside_checkout(self):
+        outside = self._tmp_root / "outside.toml"
+        outside.write_text("# outside\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            resolve_scanner_config(
+                scanner="tool",
+                checkout_root=self._target_root,
+                candidates=("tool.toml",),
+                fallback=self._fallback,
+                configured_path="../outside.toml",
+            )
+
+    def test_explicit_config_symlink_must_stay_inside_checkout(self):
+        outside = self._tmp_root / "outside.toml"
+        outside.write_text("# outside\n", encoding="utf-8")
+        link = self._target_root / "tool.toml"
+        link.symlink_to(outside)
+        with self.assertRaises(ValueError):
+            resolve_scanner_config(
+                scanner="tool",
+                checkout_root=self._target_root,
+                candidates=("tool.toml",),
+                fallback=self._fallback,
+                configured_path="tool.toml",
+            )
+
     def test_missing_default_is_an_error_not_an_unconfigured_scan(self):
         # No config anywhere means the tooling checkout is broken. Running
         # the scanner on tool defaults would quietly change what is being
@@ -78,6 +131,41 @@ class ResolveScannerConfigTest(unittest.TestCase):
         with self.assertRaises(FileNotFoundError) as ctx:
             self._resolve()
         self.assertIn(str(self._fallback), str(ctx.exception))
+
+
+class ScannerConfigPathsTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._target_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_defaults_are_preserved_when_no_override_is_set(self):
+        self.assertEqual(
+            scanner_config_paths(
+                checkout_root=self._target_root,
+                configured_path="",
+                candidates=("tool.yml", ".tool.yml"),
+            ),
+            ("tool.yml", ".tool.yml"),
+        )
+
+    def test_explicit_path_is_normalized_for_git_diff_output(self):
+        self.assertEqual(
+            scanner_config_paths(
+                checkout_root=self._target_root,
+                configured_path="./security_tools/../security_tools/tool.yml",
+                candidates=("tool.yml",),
+            ),
+            ("security_tools/tool.yml",),
+        )
+
+    def test_absolute_path_is_rejected(self):
+        with self.assertRaises(ValueError):
+            scanner_config_paths(
+                checkout_root=self._target_root,
+                configured_path="/tmp/tool.yml",
+                candidates=("tool.yml",),
+            )
 
 
 class FindConfigChangeTest(unittest.TestCase):
