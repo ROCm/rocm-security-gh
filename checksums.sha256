@@ -18,7 +18,7 @@
 # Verified against zizmor's SLSA provenance attestation, which attests this
 # digest to a build of zizmorcore/zizmor at refs/tags/v1.30.0:
 # https://api.github.com/repos/zizmorcore/zizmor/attestations/sha256:ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed
-ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed  zizmor-x86_64-unknown-linux-gnu.tar.gz
+ec8c95cd800845abb9bbc5f377ec7c57d2eb8e2386a00a201d3a74ee4092e5ed  zizmor_1.30.0_x86_64-unknown-linux-gnu.tar.gz
 
 # Original source: https://files.pythonhosted.org/packages/aa/c3/0cb80dfe0f3076e5da7e4c5ad8e57bac6ac357ff4a6406205501cade4965/bandit-1.9.4.tar.gz
 b589e5de2afe70bd4d53fa0c1da6199f4085af666fde00e8a034f152a52cd628  bandit-1.9.4.tar.gz

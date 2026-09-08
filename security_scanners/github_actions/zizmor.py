@@ -67,12 +67,10 @@ _FORMAT_ALIASES: dict[str, str] = {"human": "plain"}
 _ZIZMOR_VERSION = "1.30.0"
 # Mirrored to the rocm-third-party-deps S3 bucket so CI doesn't depend on
 # github.com; the mirrored object's digest is pinned in `checksums.sha256`.
-# Unlike gitleaks'/trivy's release assets, zizmor's own filename doesn't
-# embed a version, and it's mirrored under that same unversioned name --
-# so a version bump MUST re-verify and replace both the mirrored object
-# and this filename's `checksums.sha256` entry together in the same PR;
-# the old digest would otherwise silently keep "matching" a stale binary.
-_ZIZMOR_TARBALL_FILENAME = "zizmor-x86_64-unknown-linux-gnu.tar.gz"
+# Upstream's release filename is unversioned, so the mirror adds the
+# version to make its object key immutable. Older workflow revisions can
+# therefore keep downloading their pinned artifact after a version bump.
+_ZIZMOR_TARBALL_FILENAME = f"zizmor_{_ZIZMOR_VERSION}_x86_64-unknown-linux-gnu.tar.gz"
 _ZIZMOR_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_ZIZMOR_TARBALL_FILENAME}"
 _CONFIG_PATH = "zizmor.yml"
 # Where a scanned repository is allowed to keep its own config, in
