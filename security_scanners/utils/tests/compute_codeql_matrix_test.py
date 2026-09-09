@@ -648,6 +648,8 @@ class MainTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self._output = Path(self._tmp.name) / "output"
         self._summary = Path(self._tmp.name) / "summary"
+        self._checkout_root = Path(self._tmp.name) / "scan-target"
+        self._checkout_root.mkdir()
         self._env = {
             "GITHUB_REPOSITORY": "ROCm/x",
             "GITHUB_SHA": "abc",
@@ -655,8 +657,16 @@ class MainTest(unittest.TestCase):
             "GITHUB_OUTPUT": str(self._output),
             "GITHUB_STEP_SUMMARY": str(self._summary),
             "GITHUB_EVENT_PATH": "",
+            "SCANNER_CHECKOUT_ROOT": str(self._checkout_root),
+            "SCANNER_CODEQL_CONFIG_PATH": "",
             "SCANNER_TIMEOUT_MINUTES": "",
         }
+
+    def _configure_codeql(self, config_path: str) -> None:
+        target = self._checkout_root / config_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("paths-ignore: []\n", encoding="utf-8")
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = config_path
 
     def _run(self, api: FakeApi) -> int:
         with (
@@ -690,6 +700,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(outputs["skipped_languages"], "Go (needs a build)")
         self.assertEqual(outputs["detection_source"], DETECTION_LANGUAGES_AND_TREE)
         self.assertEqual(outputs["tree_truncated"], "false")
+        self.assertEqual(outputs["config_path"], "")
         self.assertEqual(
             json.loads(outputs["matrix"])["include"][0],
             {"language": "actions", "timeout_minutes": DEFAULT_TIMEOUT_MINUTES},
@@ -755,6 +766,52 @@ class MainTest(unittest.TestCase):
         outputs = self._outputs()
         self.assertEqual(outputs["enabled"], "false")
         self.assertEqual(json.loads(outputs["matrix"]), {"include": []})
+
+    def test_a_codeql_config_change_analyses_every_discovered_language(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql(".github/codeql/codeql-config.yml")
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = "./.github/codeql/codeql-config.yml"
+        api = FakeApi(
+            languages={"C++": 1, "Python": 1},
+            tree=_tree(["src/a.cpp", "tools/b.py"]),
+            pull_files=[[{"filename": ".github/codeql/codeql-config.yml"}]],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_languages"], "actions,c-cpp,python")
+        self.assertEqual(
+            self._outputs()["config_path"], ".github/codeql/codeql-config.yml"
+        )
+
+    def test_an_unchanged_codeql_config_does_not_widen_a_pull_request(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql(".github/codeql/codeql-config.yml")
+        api = FakeApi(
+            languages={"Python": 1},
+            tree=_tree(["tools/b.py"]),
+            pull_files=[[{"filename": "README.md"}]],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["enabled"], "false")
+
+    def test_a_codeql_config_path_outside_the_repository_is_rejected(self):
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = "../codeql.yml"
+        api = FakeApi(languages={"Python": 1}, tree=_tree(["tool.py"]))
+        self.assertEqual(self._run(api), 2)
+
+    def test_a_missing_codeql_config_file_is_rejected(self):
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = "missing.yml"
+        api = FakeApi(languages={"Python": 1}, tree=_tree(["tool.py"]))
+        self.assertEqual(self._run(api), 2)
+
+    def test_a_codeql_config_symlink_outside_the_repository_is_rejected(self):
+        outside = Path(self._tmp.name) / "outside.yml"
+        outside.write_text("paths-ignore: []\n", encoding="utf-8")
+        (self._checkout_root / "codeql.yml").symlink_to(outside)
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = "codeql.yml"
+        api = FakeApi(languages={"Python": 1}, tree=_tree(["tool.py"]))
+        self.assertEqual(self._run(api), 2)
 
     def test_scan_mode_all_analyses_every_discovered_language(self):
         self._with_pull_request()

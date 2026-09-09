@@ -51,6 +51,14 @@ on:
         required: false
         type: string
         default: ""
+      codeql_config_path:
+        description: >-
+          Optional path to the repository's CodeQL YAML config, relative
+          to the repository root. Use it to configure analysis scope,
+          including paths and paths-ignore.
+        required: false
+        type: string
+        default: ""
       gitleaks_config_path:
         description: >-
           Optional path to the repository's gitleaks TOML config,
@@ -119,6 +127,7 @@ jobs:
   codeql:
     uses: $/.github/workflows/codeql.yml
     with:
+      config_path: ${{ inputs.codeql_config_path }}
       scan_mode: ${{ inputs.scan_mode }}
       timeout_minutes: ${{ inputs.timeout_minutes }}
 

@@ -51,8 +51,9 @@ scanner, which means:
 Inputs, all optional, describe the calling event, who reads the output,
 where repository-specific scanner configs live and how long the
 repository is willing to wait: `scan_mode`, `report_formats`,
-`scan_path`, `<scanner>_config_path` and `timeout_minutes`. The input
-descriptions in the workflow file are the authoritative reference.
+`scan_path`, `codeql_config_path`, the four script-backed scanners'
+`<scanner>_config_path` inputs and `timeout_minutes`. The input descriptions
+in the workflow file are the authoritative reference.
 
 `timeout_minutes` is the one input that moves a scanner's own budget,
 and it only ever moves it up. Each scanner gets 20 to 30 minutes here
@@ -86,6 +87,7 @@ which one won:
 | zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `zizmor.yml`    |
 | bandit   | `bandit.yaml`, `bandit.yml`                                              | `bandit.yaml`   |
 | trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `trivy.yaml`    |
+| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults |
 
 Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
@@ -100,17 +102,19 @@ jobs:
     uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@<full commit SHA>
     with:
       bandit_config_path: security_tools/bandit.yaml
+      codeql_config_path: .github/codeql/codeql-config.yml
       gitleaks_config_path: security_tools/gitleaks.toml
       trivy_config_path: security_tools/trivy.yaml
       zizmor_config_path: security_tools/zizmor.yaml
 ```
 
-An explicit path is the only location considered for that scanner. It
-must name a file inside the scanned repository: a missing file, absolute
-path, path traversal or symlink outside the checkout fails the scan
-instead of silently selecting the baseline default. Omitting the input
+An explicit path is the only location considered for that scanner. It must
+name a file inside the scanned repository: a missing file, absolute path,
+path traversal or symlink outside the checkout fails the scan instead of
+silently selecting a default. Omitting a script-backed scanner's input
 preserves the conventional-location discovery and fallback in the table
-above.
+above. CodeQL config is intentionally explicit; omitting
+`codeql_config_path` leaves the CodeQL action on its defaults.
 
 This covers detection: allowlists, excluded paths, per-rule
 suppressions, and the fingerprints of findings already triaged. It does
@@ -120,11 +124,12 @@ a scanner off, only describe the repository it is scanning.
 
 A PR that touches an automatically discovered or explicitly configured
 Bandit, Trivy or zizmor config is scanned in full rather than against its
-changed files alone, since a config change applies to the whole
-repository. Gitleaks already scans the full commit range rather than a
-filtered file list. That is what makes a suppression visible in the run
-that adds it, and a broken config fail the PR that wrote it instead of
-the next unrelated one.
+changed files alone, since a config change applies to the whole repository.
+A change to the explicit CodeQL config similarly runs every discovered
+language. Gitleaks already scans the full commit range rather than a filtered
+file list. That is what makes a suppression visible in the run that adds it,
+and a broken config fail the PR that wrote it instead of the next unrelated
+one.
 
 A repository that tunes detection this way owns the consequences: an
 allowlist wide enough to hide real findings will hide them. Prefer the
@@ -223,6 +228,22 @@ dangerous sink several functions away from where it entered.
   touched.
 - `scan_mode: changed` narrows which languages run to the ones the pull
   request touched.
+- `codeql_config_path` passes a config file from the scanned repository to
+  CodeQL. Unlike `scan_mode`, its `paths` and `paths-ignore` settings control
+  which source files CodeQL puts in its database.
+
+For example, a repository that vendors dependencies under
+`build_tools/third_party` can keep `.github/codeql/codeql-config.yml`:
+
+```yaml
+paths-ignore:
+  - build_tools/third_party/**
+```
+
+and pass that file as `codeql_config_path`. The config path is checked after
+the scan target is checked out, before CodeQL initializes. Changing the file
+in a pull request widens changed-mode planning to every discovered language
+so the new analysis scope is exercised immediately.
 
 **Languages are discovered per run, never configured.** A hard-coded
 language list is wrong as soon as a repository grows a language, and
