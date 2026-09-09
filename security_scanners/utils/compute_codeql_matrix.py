@@ -19,11 +19,12 @@ Two API sources, because neither alone is enough:
 
 import json
 import os
+import posixpath
 import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
@@ -529,6 +530,54 @@ def resolve_timeout(requested_minutes: int) -> int:
     return max(DEFAULT_TIMEOUT_MINUTES, requested_minutes)
 
 
+def _normalize_config_path(config_path: str) -> str:
+    """Return a normalized repository-relative CodeQL config path."""
+    raw = config_path.strip()
+    if not raw:
+        return ""
+
+    normalized = posixpath.normpath(raw)
+    path = PurePosixPath(normalized)
+    if path.is_absolute():
+        raise DiscoveryError(
+            f"CodeQL config path {config_path!r} must be relative to the repository"
+        )
+    if normalized == ".." or normalized.startswith("../"):
+        raise DiscoveryError(
+            f"CodeQL config path {config_path!r} resolves outside the repository"
+        )
+    if normalized == ".":
+        raise DiscoveryError(f"CodeQL config path {config_path!r} does not name a file")
+    return path.as_posix()
+
+
+def validate_config_path(config_path: str, checkout_root: Path) -> str:
+    """Validate and return a CodeQL config path relative to the scan target."""
+    normalized = _normalize_config_path(config_path)
+    if not normalized:
+        return ""
+
+    try:
+        root = checkout_root.resolve(strict=True)
+        resolved = (root / config_path.strip()).resolve(strict=True)
+    except OSError as exc:
+        raise DiscoveryError(
+            f"CodeQL config file {config_path!r} does not exist"
+        ) from exc
+
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise DiscoveryError(
+            f"CodeQL config path {config_path!r} resolves outside the repository"
+        ) from exc
+    if not resolved.is_file():
+        raise DiscoveryError(
+            f"CodeQL config path {config_path!r} does not resolve to a file"
+        )
+    return normalized
+
+
 def _changed_files_to_restrict_to(
     fetcher: JsonFetcher,
     *,
@@ -536,23 +585,32 @@ def _changed_files_to_restrict_to(
     event: Mapping[str, object],
     scan_mode: str,
     already_fetched: ChangedFiles | None,
+    config_path: str,
 ) -> ChangedFiles | None:
     """Return the file list to narrow the matrix with, or None to analyse everything.
 
     Only a `changed`-mode pull request narrows anything. A file list
     that couldn't be read narrows nothing -- an API failure has to widen
-    the scan, never shrink it.
+    the scan, never shrink it. A CodeQL config change also widens the
+    scan because its paths and query settings apply repository-wide.
     """
+    normalized_config_path = _normalize_config_path(config_path)
     number = pull_request_number(event)
     if scan_mode != "changed" or number is None:
         return None
     if already_fetched is not None:
-        return already_fetched
-    try:
-        return fetch_changed_files(fetcher, repo, number)
-    except (DiscoveryError, OSError) as exc:
-        print(f"Could not list the pull request's files ({exc})")
-        return ChangedFiles(paths=(), complete=False)
+        changed_files = already_fetched
+    else:
+        try:
+            changed_files = fetch_changed_files(fetcher, repo, number)
+        except (DiscoveryError, OSError) as exc:
+            print(f"Could not list the pull request's files ({exc})")
+            return ChangedFiles(paths=(), complete=False)
+
+    if normalized_config_path and normalized_config_path in changed_files.paths:
+        print("CodeQL config changed; analysing every discovered language")
+        return None
+    return changed_files
 
 
 def main(argv: Sequence[str]) -> int:
@@ -598,6 +656,10 @@ def main(argv: Sequence[str]) -> int:
             print(f"Ignoring unreadable event payload: {exc}")
 
     try:
+        config_path = validate_config_path(
+            os.environ.get("SCANNER_CODEQL_CONFIG_PATH", ""),
+            Path(os.environ.get("SCANNER_CHECKOUT_ROOT", ".scan-target")),
+        )
         discovery = discover(fetcher, repo=repo, sha=sha, event=event)
         plan = build_plan(
             discovery,
@@ -607,6 +669,7 @@ def main(argv: Sequence[str]) -> int:
                 event=event,
                 scan_mode=os.environ.get("SCANNER_SCAN_MODE", "changed"),
                 already_fetched=discovery.changed_files,
+                config_path=config_path,
             ),
         )
     except DiscoveryError as exc:
@@ -638,6 +701,7 @@ def main(argv: Sequence[str]) -> int:
             "matrix": matrix,
             "enabled": "true" if plan.selected else "false",
             "selected_languages": ",".join(plan.selected),
+            "config_path": config_path,
             "skipped_languages": ",".join(plan.skipped),
             "detection_source": plan.detection_source,
             "tree_truncated": "true" if plan.tree_truncated else "false",

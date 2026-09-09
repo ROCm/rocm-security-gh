@@ -9,6 +9,14 @@ name: CodeQL
 on:
   workflow_call:
     inputs:
+      config_path:
+        description: >-
+          Optional path to the scan target's CodeQL YAML config, relative
+          to the repository root. The path must resolve to a file inside
+          the target checkout.
+        required: false
+        type: string
+        default: ""
       scan_mode:
         description: >-
           'changed' (default) analyses only the languages the calling
@@ -37,12 +45,20 @@ jobs:
       matrix: ${{ steps.codeql.outputs.matrix }}
       enabled: ${{ steps.codeql.outputs.enabled }}
       selected_languages: ${{ steps.codeql.outputs.selected_languages }}
+      config_path: ${{ steps.codeql.outputs.config_path }}
     steps:
       - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Checkout scan target for config validation
+        if: inputs.config_path != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .scan-target
           persist-credentials: false
 
       - name: Set up Python
@@ -54,6 +70,8 @@ jobs:
         id: codeql
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SCANNER_CHECKOUT_ROOT: .scan-target
+          SCANNER_CODEQL_CONFIG_PATH: ${{ inputs.config_path }}
           SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
           SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: python -m security_scanners.utils.compute_codeql_matrix
@@ -79,6 +97,7 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
+          config-file: ${{ needs.plan.outputs.config_path }}
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
