@@ -6,7 +6,7 @@
 # `pr-security-scan.yml`, which scans only what changed in a PR and
 # uploads reviewer-readable artifacts for in-review browsing.
 
-name: Weekly security scan
+name: Security scan (Weekly)
 
 on:
   # Run every Saturday at 10:00 UTC.
