@@ -184,6 +184,7 @@ jobs:
         with:
           sarif_file: ${{ steps.scan.outputs.sarif_path }}
           category: ${{ matrix.scanner }}
+          checkout_path: .scan-target
 
       - name: Upload non-SARIF reports
         if: always() && steps.scan.outputs.non_sarif_paths != ''
