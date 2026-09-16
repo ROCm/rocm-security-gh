@@ -14,6 +14,7 @@ from security_scanners.utils.compute_codeql_matrix import (
     DETECTION_LANGUAGES_AND_CHANGED_FILES,
     DETECTION_LANGUAGES_AND_TREE,
     DETECTION_LANGUAGES_ONLY,
+    DETECTION_PRIVATE_REPOSITORY_POLICY,
     DETECTION_TREE_ONLY,
     ChangedFiles,
     CodeqlPlan,
@@ -659,6 +660,7 @@ class MainTest(unittest.TestCase):
             "GITHUB_EVENT_PATH": "",
             "SCANNER_CHECKOUT_ROOT": str(self._checkout_root),
             "SCANNER_CODEQL_CONFIG_PATH": "",
+            "SCANNER_REPOSITORY_PRIVATE": "false",
             "SCANNER_TIMEOUT_MINUTES": "",
         }
 
@@ -718,6 +720,26 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self._run(FakeApi(languages=None, tree=None)), 2)
         self.assertNotIn("matrix", self._outputs())
         self.assertIn("Failed", self._summary.read_text(encoding="utf-8"))
+
+    def test_private_repository_disables_codeql_without_api_calls(self):
+        self._env["SCANNER_REPOSITORY_PRIVATE"] = "true"
+        self._env["GITHUB_REPOSITORY"] = ""
+        self._env["GITHUB_SHA"] = ""
+        api = FakeApi(languages={"Python": 1}, tree=_tree(["tool.py"]))
+
+        self.assertEqual(self._run(api), 0)
+
+        outputs = self._outputs()
+        self.assertEqual(outputs["enabled"], "false")
+        self.assertEqual(json.loads(outputs["matrix"]), {"include": []})
+        self.assertEqual(
+            outputs["detection_source"], DETECTION_PRIVATE_REPOSITORY_POLICY
+        )
+        self.assertEqual(api.paths_requested, [])
+        self.assertIn(
+            "Disabled by policy",
+            self._summary.read_text(encoding="utf-8"),
+        )
 
     def test_a_missing_repository_or_sha_is_a_failure_not_a_guess(self):
         self._env["GITHUB_SHA"] = ""

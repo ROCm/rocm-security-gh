@@ -4,7 +4,7 @@
 """Run trivy against the current repository checkout.
 
 - Download and SHA256-verify the pinned `trivy` release binary.
-- Require `trivy.yaml` at the repo root (hard error if missing).
+- Require the baseline Trivy config (hard error if missing).
 - Derive change sets from the GitHub event for changed/all scans; in
   'changed' mode short-circuit to a no-op unless a dependency
   manifest / IaC / container file changed under `--source-dir` (trivy's
@@ -22,7 +22,7 @@ Exit codes:
 * `0` - clean run, or an empty changed-file set.
 * `1` - findings at/above `--severity-threshold`, or `--report-formats`
   / `--scanners` was empty/unknown.
-* `2` - input error: scan path missing, `trivy.yaml` missing,
+* `2` - input error: scan path missing, baseline config missing,
   `GITHUB_EVENT_PATH` malformed, or trivy itself errored.
 
 Inputs come from CLI flags or matching `SCANNER_*` env vars set by
@@ -85,7 +85,7 @@ _FORMAT_ALIASES: dict[str, str] = {"human": "table"}
 _TRIVY_VERSION = "0.70.0"
 _TRIVY_TARBALL_FILENAME = f"trivy_{_TRIVY_VERSION}_Linux-64bit.tar.gz"
 _TRIVY_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_TRIVY_TARBALL_FILENAME}"
-_CONFIG_PATH = "trivy.yaml"
+_CONFIG_PATH = ".github/scan_tools_configs/trivy.yml"
 # Where a scanned repository is allowed to keep its own config, in the
 # order trivy itself would look for one.
 _CONFIG_CANDIDATES: tuple[str, ...] = ("trivy.yaml", "trivy.yml")

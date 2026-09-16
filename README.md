@@ -81,13 +81,13 @@ falls back to the copy in this repository when it ships none. The scan
 log names the file that was used, so it is always visible in the check
 which one won:
 
-| Scanner  | Read from the scanned repository, first match wins                       | Default here    |
-| -------- | ------------------------------------------------------------------------ | --------------- |
-| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `gitleaks.toml` |
-| zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `zizmor.yml`    |
-| bandit   | `bandit.yaml`, `bandit.yml`                                              | `bandit.yaml`   |
-| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `trivy.yaml`    |
-| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults |
+| Scanner  | Read from the scanned repository, first match wins                       | Default here                               |
+| -------- | ------------------------------------------------------------------------ | ------------------------------------------ |
+| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `.github/scan_tools_configs/gitleaks.toml` |
+| zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
+| bandit   | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
+| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `.github/scan_tools_configs/trivy.yml`     |
+| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults                            |
 
 Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
@@ -231,6 +231,10 @@ dangerous sink several functions away from where it entered.
 - `codeql_config_path` passes a config file from the scanned repository to
   CodeQL. Unlike `scan_mode`, its `paths` and `paths-ignore` settings control
   which source files CodeQL puts in its database.
+- Private repositories skip CodeQL by baseline policy, even when GitHub Code
+  Security is licensed there. The planning and `complete` jobs still succeed
+  and report that CodeQL was intentionally disabled; the other scanners
+  continue normally.
 
 For example, a repository that vendors dependencies under
 `build_tools/third_party` can keep `.github/codeql/codeql-config.yml`:

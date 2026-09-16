@@ -4,7 +4,7 @@
 """Run zizmor against the current repository checkout.
 
 - Install the pinned `zizmor` release and verify it.
-- Require `zizmor.yml` at the repo root (hard error if missing).
+- Require the baseline zizmor config (hard error if missing).
 - Derive change sets from the GitHub event for changed/all scans; run per
   requested format and emit SARIF/non-SARIF paths plus a severity tally.
 
@@ -13,7 +13,7 @@ Exit codes:
 * `0` - clean run, or an empty changed-file set.
 * `1` - findings at/above `--severity-threshold`, or `--report-formats`
   was empty/unknown.
-* `2` - input error: scan path missing, `zizmor.yml` missing,
+* `2` - input error: scan path missing, baseline config missing,
   `GITHUB_EVENT_PATH` malformed, or zizmor itself errored.
 
 Inputs come from CLI flags or the matching `SCANNER_*` env vars set by
@@ -73,7 +73,7 @@ _ZIZMOR_VERSION = "1.30.0"
 # therefore keep downloading their pinned artifact after a version bump.
 _ZIZMOR_TARBALL_FILENAME = f"zizmor_{_ZIZMOR_VERSION}_x86_64-unknown-linux-gnu.tar.gz"
 _ZIZMOR_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_ZIZMOR_TARBALL_FILENAME}"
-_CONFIG_PATH = "zizmor.yml"
+_CONFIG_PATH = ".github/scan_tools_configs/zizmor.yml"
 # Where a scanned repository is allowed to keep its own config, in
 # zizmor's own discovery order: .github before the repository root, .yml
 # before .yaml (both spellings since v1.19.0). Passing --config disables
