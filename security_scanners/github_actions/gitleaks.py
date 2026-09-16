@@ -7,7 +7,7 @@ Exit codes:
 
 * `0` - no leaks, clean run.
 * `1` - gitleaks found leaks, or `--report-formats` was empty/unknown.
-* `2` - input error: scan path missing, `gitleaks.toml` missing,
+* `2` - input error: scan path missing, baseline config missing,
   `GITHUB_EVENT_PATH` malformed, or gitleaks itself errored.
 
 Inputs come from CLI flags or the matching `SCANNER_*` env vars set by
@@ -67,7 +67,7 @@ _FORMAT_ALIASES: dict[str, str] = {"human": "csv"}
 _GITLEAKS_VERSION = "8.30.1"
 _GITLEAKS_TARBALL_FILENAME = f"gitleaks_{_GITLEAKS_VERSION}_linux_x64.tar.gz"
 _GITLEAKS_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_GITLEAKS_TARBALL_FILENAME}"
-_CONFIG_PATH = "gitleaks.toml"
+_CONFIG_PATH = ".github/scan_tools_configs/gitleaks.toml"
 # Where a scanned repository is allowed to keep its own config, in the
 # order gitleaks itself would look for one.
 #

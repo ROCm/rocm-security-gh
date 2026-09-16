@@ -4,7 +4,7 @@
 """Run bandit against the current repository checkout.
 
 - Install the pinned `bandit[sarif]` release and verify it.
-- Require `bandit.yaml` at the repo root (hard error if missing).
+- Require the baseline Bandit config (hard error if missing).
 - Derive change sets from the GitHub event for changed/all scans; run per
   requested format and emit SARIF/non-SARIF paths plus a severity tally.
 
@@ -13,7 +13,7 @@ Exit codes:
 * `0` - clean run, or an empty changed-file set.
 * `1` - findings at/above `--severity-threshold`, or `--report-formats`
   was empty/unknown.
-* `2` - input error: scan path missing, `bandit.yaml` missing,
+* `2` - input error: scan path missing, baseline config missing,
   `GITHUB_EVENT_PATH` malformed, or bandit itself errored.
 
 Inputs come from CLI flags or matching `SCANNER_*` env vars set by
@@ -86,7 +86,7 @@ _BANDIT_SDIST_FILENAME = f"bandit-{_BANDIT_VERSION}.tar.gz"
 _BANDIT_SDIST_URL = (
     f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_BANDIT_SDIST_FILENAME}"
 )
-_CONFIG_PATH = "bandit.yaml"
+_CONFIG_PATH = ".github/scan_tools_configs/bandit.yml"
 # Where a scanned repository is allowed to keep its own config. Only the
 # YAML form bandit's `-c` accepts: a `.bandit` file is INI-formatted CLI
 # defaults, which `-c` can't read.

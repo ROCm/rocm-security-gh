@@ -55,7 +55,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout scan target for config validation
-        if: inputs.config_path != ''
+        if: inputs.config_path != '' && github.event.repository.private != true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: .scan-target
@@ -72,6 +72,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SCANNER_CHECKOUT_ROOT: .scan-target
           SCANNER_CODEQL_CONFIG_PATH: ${{ inputs.config_path }}
+          SCANNER_REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
           SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: python -m security_scanners.utils.compute_codeql_matrix

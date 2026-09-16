@@ -137,6 +137,7 @@ DETECTION_LANGUAGES_AND_TREE = "github-languages+exact-tree"
 DETECTION_LANGUAGES_AND_CHANGED_FILES = "github-languages+changed-files"
 DETECTION_LANGUAGES_ONLY = "github-languages-only"
 DETECTION_TREE_ONLY = "exact-tree-fallback"
+DETECTION_PRIVATE_REPOSITORY_POLICY = "private-repository-policy"
 
 
 class JsonFetcher(Protocol):
@@ -617,6 +618,28 @@ def main(argv: Sequence[str]) -> int:
     if argv:
         print(f"unexpected arguments: {' '.join(argv)}", file=sys.stderr)
         return 2
+
+    if os.environ.get("SCANNER_REPOSITORY_PRIVATE", "").lower() == "true":
+        matrix = json.dumps({"include": []})
+        message = "CodeQL is disabled for private repositories by baseline policy"
+        print(message)
+        gha_set_output(
+            {
+                "matrix": matrix,
+                "enabled": "false",
+                "selected_languages": "",
+                "config_path": "",
+                "skipped_languages": message,
+                "detection_source": DETECTION_PRIVATE_REPOSITORY_POLICY,
+                "tree_truncated": "false",
+            }
+        )
+        gha_append_step_summary(
+            "### CodeQL language discovery\n\n"
+            "- Disabled by policy: this is a private repository.\n"
+            "- The other security scanners are unaffected."
+        )
+        return 0
 
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     sha = os.environ.get("GITHUB_SHA", "")

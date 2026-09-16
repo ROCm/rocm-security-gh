@@ -578,6 +578,7 @@ class ResolveConfigPathTest(unittest.TestCase):
 
     def _write_default_config(self) -> Path:
         path = self._tooling_root / _CONFIG_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("exclude_dirs: []\n", encoding="utf-8")
         return path
 
