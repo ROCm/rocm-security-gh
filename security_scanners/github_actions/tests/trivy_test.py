@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from trivy import (
     _CONFIG_PATH,
+    _DEFAULT_SCANNERS,
     _ReportTarget,
     _SEVERITY_ORDER,
     _TRIVY_TARBALL_FILENAME,
@@ -100,6 +101,28 @@ class MainTest(unittest.TestCase):
     def test_invalid_scanners_returns_1(self):
         rc = main(["--scan-mode", "all", "--source-dir", ".", "--scanners", "bogus"])
         self.assertEqual(rc, 1)
+
+    def test_default_scanners_include_license(self):
+        # License scanning is org policy for every trivy run, so omitting
+        # --scanners must still pass 'license' through to the tool. A
+        # caller can still drop it explicitly; they just cannot do so by
+        # accident via the default.
+        with (
+            mock.patch("trivy.gha_append_step_summary"),
+            mock.patch("trivy.gha_set_output"),
+            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+            mock.patch(
+                "trivy._run_trivy",
+                return_value={sev: 0 for sev in _SEVERITY_ORDER},
+            ) as run_trivy,
+        ):
+            rc = main(["--scan-mode", "all", "--source-dir", "."])
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            run_trivy.call_args.kwargs["scanners"],
+            ["misconfig", "vuln", "license"],
+        )
 
 
 class SeverityGateTest(unittest.TestCase):
@@ -222,8 +245,11 @@ class ParseReportFormatsTest(unittest.TestCase):
 class ParseScannersTest(unittest.TestCase):
     """Tests for `_parse_scanners`."""
 
-    def test_default_misconfig_and_vuln(self):
-        self.assertEqual(_parse_scanners("misconfig,vuln"), ["misconfig", "vuln"])
+    def test_default_scanners_parse(self):
+        self.assertEqual(
+            _parse_scanners(_DEFAULT_SCANNERS),
+            ["misconfig", "vuln", "license"],
+        )
 
     def test_whitespace_case_and_dedup(self):
         self.assertEqual(

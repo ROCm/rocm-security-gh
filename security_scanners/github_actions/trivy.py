@@ -14,8 +14,8 @@
   scan the whole subtree or nothing). Run per requested format and
   emit SARIF/non-SARIF paths plus a severity tally.
 
-Default scanners are `misconfig,vuln`; `secret` is omitted because
-gitleaks already covers secret detection.
+Default scanners are `misconfig,vuln,license`; `secret` is omitted
+because gitleaks already covers secret detection.
 
 Exit codes:
 
@@ -99,7 +99,7 @@ _DEFAULT_SEVERITY_THRESHOLD = "high"
 # Trivy scanners: vuln (CVEs), misconfig (IaC), secret, license.
 _SUPPORTED_SCANNERS: tuple[str, ...] = ("vuln", "misconfig", "secret", "license")
 # Omits 'secret': gitleaks already covers secret detection in this repo.
-_DEFAULT_SCANNERS = "misconfig,vuln"
+_DEFAULT_SCANNERS = "misconfig,vuln,license"
 # Internal JSON tally pass output; cleaned up before returning.
 _INTERNAL_TALLY_PATH = "trivy-tally.json"
 # Diff filter for 'changed' mode: dependency manifests/lockfiles (drive
