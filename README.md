@@ -193,10 +193,11 @@ confidence.
 ### Trivy
 
 [trivy](https://trivy.dev/) scans a filesystem for known vulnerabilities
-in declared dependencies and for infrastructure misconfigurations --
-vulnerable package versions across language and OS manifests, plus
-insecure Dockerfile, Kubernetes, Terraform and Helm settings -- matching
-against its own regularly updated vulnerability and policy databases.
+in declared dependencies, for infrastructure misconfigurations, and for
+declared package licenses -- vulnerable package versions across language
+and OS manifests, insecure Dockerfile, Kubernetes, Terraform and Helm
+settings, and licenses Trivy classifies as risky -- matching against its
+own regularly updated vulnerability, policy and license databases.
 
 - Check run: `trivy`
 - `report_formats`: `sarif` (default), `json`, `table`, `cyclonedx`,
@@ -207,8 +208,9 @@ against its own regularly updated vulnerability and policy databases.
   dependencies and cross-file IaC references, so unlike bandit and zizmor
   it is never handed an individual file list.
 - Fails on findings at or above HIGH severity; reports still carry every
-  finding. Runs trivy's `misconfig` and `vuln` scanners; `secret` is
-  deliberately left out because gitleaks already covers secret detection.
+  finding. Runs trivy's `misconfig`, `vuln` and `license` scanners;
+  `secret` is deliberately left out because gitleaks already covers
+  secret detection.
 
 ### CodeQL
 
