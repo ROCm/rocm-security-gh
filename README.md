@@ -50,10 +50,11 @@ scanner, which means:
 
 Inputs, all optional, describe the calling event, who reads the output,
 where repository-specific scanner configs live and how long the
-repository is willing to wait: `scan_mode`, `report_formats`,
-`scan_path`, `codeql_config_path`, the four script-backed scanners'
-`<scanner>_config_path` inputs and `timeout_minutes`. The input descriptions
-in the workflow file are the authoritative reference.
+repository is willing to wait: `scan_mode`, `run_on_label_change`,
+`report_formats`, `scan_path`, `codeql_config_path`, the four
+script-backed scanners' `<scanner>_config_path` inputs and
+`timeout_minutes`. The input descriptions in the workflow file are the
+authoritative reference.
 
 `timeout_minutes` is the one input that moves a scanner's own budget,
 and it only ever moves it up. Each scanner gets 20 to 30 minutes here
@@ -303,6 +304,28 @@ every repository -- no per-scanner jobs to add or maintain.
        with:
          report_formats: human
    ```
+
+   By default, this runs for the `pull_request` event's `opened`,
+   `synchronize` and `reopened` activity types. To rerun the scanners
+   whenever a label is added or removed, subscribe the caller to those
+   activity types and opt in on the reusable workflow:
+
+   ```yaml
+   on:
+     pull_request:
+       types: [opened, synchronize, reopened, labeled, unlabeled]
+   jobs:
+     security:
+       uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1.0.0
+       with:
+         report_formats: human
+         run_on_label_change: true
+   ```
+
+   Both settings are required: only the caller can subscribe to GitHub
+   events, while `run_on_label_change` tells the reusable workflow to
+   accept label-change events. Its default is `false`, so existing callers
+   retain their current behavior.
 
 1. Add a scheduled workflow that uploads to the Security tab. Grant
    `security-events: write` on the `uses:` job itself -- the top-level
