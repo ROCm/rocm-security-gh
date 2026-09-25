@@ -16,12 +16,14 @@ from security_scanners.utils.compute_codeql_matrix import (
     DETECTION_LANGUAGES_ONLY,
     DETECTION_PRIVATE_REPOSITORY_POLICY,
     DETECTION_TREE_ONLY,
+    MAX_BUILDLESS_CPP_FILES,
     ChangedFiles,
     CodeqlPlan,
     Discovery,
     DiscoveryError,
     _github_get,
     build_plan,
+    count_cpp_files,
     discover,
     languages_from_paths,
     main,
@@ -121,6 +123,20 @@ class LanguagesFromPathsTest(unittest.TestCase):
             set(),
         )
 
+    def test_counts_only_recognised_c_cpp_sources_and_headers(self):
+        self.assertEqual(
+            count_cpp_files(
+                [
+                    "src/main.c",
+                    "src/api.hpp",
+                    "kernels/gemm.hip",
+                    "kernels/gemm.cu",
+                    "tools/build.py",
+                ]
+            ),
+            2,
+        )
+
 
 class BuildPlanTest(unittest.TestCase):
     """Tests for the language policy."""
@@ -148,6 +164,39 @@ class BuildPlanTest(unittest.TestCase):
         )
         self.assertEqual(plan.selected, ("actions", "c-cpp"))
 
+    def test_c_cpp_at_the_standard_runner_limit_is_selected(self):
+        paths = tuple(
+            f"src/file_{index}.cpp" for index in range(MAX_BUILDLESS_CPP_FILES)
+        )
+        plan = build_plan(
+            Discovery(
+                linguist_languages=("C++",),
+                linguist_available=True,
+                paths=paths,
+                path_source="exact-tree",
+            )
+        )
+        self.assertEqual(plan.selected, ("actions", "c-cpp"))
+
+    def test_c_cpp_over_the_standard_runner_limit_is_skipped(self):
+        paths = tuple(
+            f"src/file_{index}.cpp" for index in range(MAX_BUILDLESS_CPP_FILES + 1)
+        )
+        plan = build_plan(
+            Discovery(
+                linguist_languages=("C++",),
+                linguist_available=True,
+                paths=paths,
+                path_source="exact-tree",
+            )
+        )
+        self.assertEqual(plan.selected, ("actions",))
+        self.assertIn(
+            f"c-cpp ({MAX_BUILDLESS_CPP_FILES + 1:,} C/C++ files exceeds the "
+            f"{MAX_BUILDLESS_CPP_FILES:,}-file standard-runner limit)",
+            plan.skipped,
+        )
+
     def test_the_exact_tree_finds_a_language_github_has_not_counted_yet(self):
         # Linguist statistics only refresh after a push to the default
         # branch, so a pull request adding a language is invisible to it.
@@ -171,9 +220,12 @@ class BuildPlanTest(unittest.TestCase):
                 tree_truncated=True,
             )
         )
-        self.assertEqual(plan.selected, ("actions", "c-cpp", "python"))
+        self.assertEqual(plan.selected, ("actions", "python"))
         self.assertEqual(plan.detection_source, DETECTION_LANGUAGES_AND_CHANGED_FILES)
         self.assertTrue(plan.tree_truncated)
+        self.assertTrue(
+            any("file count is unavailable" in item for item in plan.skipped)
+        )
 
     def test_a_truncated_tree_outside_a_pull_request_uses_github_languages(self):
         plan = build_plan(
@@ -297,9 +349,10 @@ class BuildPlanTest(unittest.TestCase):
         )
         self.assertEqual(plan.selected, ("actions", "python"))
 
-    def test_github_languages_still_carry_c_cpp_without_an_exact_tree(self):
-        # Without the tree there is nothing better to go on, and missing
-        # the C/C++ analysis is worse than a run that finds nothing.
+    def test_c_cpp_is_skipped_without_an_exact_tree(self):
+        # The standard runner only accepts buildless C/C++ when the
+        # complete tree proves that the repository is within its file
+        # ceiling.
         plan = build_plan(
             Discovery(
                 linguist_languages=("C++",),
@@ -307,7 +360,10 @@ class BuildPlanTest(unittest.TestCase):
                 tree_truncated=True,
             )
         )
-        self.assertEqual(plan.selected, ("actions", "c-cpp"))
+        self.assertEqual(plan.selected, ("actions",))
+        self.assertTrue(
+            any("file count is unavailable" in item for item in plan.skipped)
+        )
 
     def test_an_exact_tree_alone_is_enough(self):
         plan = build_plan(
