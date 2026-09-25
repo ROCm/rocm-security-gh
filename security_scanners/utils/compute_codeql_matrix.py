@@ -50,7 +50,7 @@ _ATTEMPTS = 3
 _RETRY_STATUSES = frozenset({500, 502, 503, 504})
 # GitHub caps a pull request's file list at 3,000 files, i.e. 30 pages.
 _MAX_FILE_PAGES = 30
-#temp workaround
+# temp workaround
 MAX_BUILDLESS_CPP_FILES = 1_000
 
 # Linguist language name -> CodeQL language, for the languages CodeQL can
