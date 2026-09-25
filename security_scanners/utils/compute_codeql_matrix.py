@@ -50,6 +50,8 @@ _ATTEMPTS = 3
 _RETRY_STATUSES = frozenset({500, 502, 503, 504})
 # GitHub caps a pull request's file list at 3,000 files, i.e. 30 pages.
 _MAX_FILE_PAGES = 30
+#temp workaround
+MAX_BUILDLESS_CPP_FILES = 1_000
 
 # Linguist language name -> CodeQL language, for the languages CodeQL can
 # analyse from source alone.
@@ -235,6 +237,14 @@ def languages_from_paths(
     return found
 
 
+def count_cpp_files(paths: Iterable[str]) -> int:
+    """Count C/C++ sources and headers recognised by the CodeQL planner."""
+    return sum(
+        _EXTENSION_LANGUAGES.get(PurePosixPath(raw.strip()).suffix.lower()) == "c-cpp"
+        for raw in paths
+    )
+
+
 def touches_actions(paths: Iterable[str]) -> bool:
     """Whether `paths` includes anything CodeQL's `actions` extractor reads."""
     for raw in paths:
@@ -330,6 +340,23 @@ def build_plan(
                 "the pull request's file list was incomplete, so every "
                 "discovered language is analysed rather than only the "
                 "languages the pull request touches"
+            )
+
+    if "c-cpp" in selected:
+        if discovery.has_exact_tree:
+            cpp_files = count_cpp_files(discovery.paths)
+            if cpp_files > MAX_BUILDLESS_CPP_FILES:
+                selected.remove("c-cpp")
+                skipped.append(
+                    f"c-cpp ({cpp_files:,} C/C++ files exceeds the "
+                    f"{MAX_BUILDLESS_CPP_FILES:,}-file standard-runner limit)"
+                )
+        else:
+            selected.remove("c-cpp")
+            skipped.append(
+                "c-cpp (the complete C/C++ file count is unavailable, "
+                f"so the {MAX_BUILDLESS_CPP_FILES:,}-file standard-runner "
+                "limit cannot be verified)"
             )
 
     return CodeqlPlan(
@@ -510,10 +537,7 @@ def render_summary(plan: CodeqlPlan) -> str:
         f"- Selected: {', '.join(f'`{lang}`' for lang in plan.selected) or 'nothing'}",
     ]
     if plan.restricted_to_changes:
-        lines.append(
-            "- Narrowed to the languages this pull request touches; the "
-            "scheduled scan covers the rest of the repository"
-        )
+        lines.append("- Narrowed to the languages this pull request touches")
     if plan.skipped:
         lines.append(f"- Skipped: {', '.join(plan.skipped)}")
     if plan.tree_truncated:
@@ -712,7 +736,7 @@ def main(argv: Sequence[str]) -> int:
             f"({timeout_minutes}m each)"
         )
     else:
-        print("No CodeQL language is affected by this pull request; nothing to analyse")
+        print("No CodeQL language selected; nothing to analyse")
     if plan.skipped:
         print(f"CodeQL skipped: {', '.join(plan.skipped)}")
     for warning in plan.warnings:
