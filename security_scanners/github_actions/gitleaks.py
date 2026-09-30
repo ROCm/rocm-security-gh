@@ -18,7 +18,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +32,7 @@ from security_scanners.utils.binary_checksums import (
     download_and_verify_tarball,
     expected_sha256,
 )
+from security_scanners.utils.step_summary import emit_reports
 from security_scanners.utils.scanner_config import (
     resolve_ignore_file,
     resolve_scanner_config,
@@ -84,9 +84,6 @@ _IGNORE_FILENAME = ".gitleaksignore"
 # gitleaks error (>1).
 _LEAK_EXIT_CODE = 1
 _LEAK_SECURITY_SEVERITY_HIGH = "8.5"
-# GitHub renders at most 1 MiB of job summary per step and drops anything
-# beyond it, so leave headroom for the headings and fences we wrap reports in.
-_STEP_SUMMARY_BUDGET_BYTES = 900 * 1024
 
 # Null SHA-1 git uses for "no previous commit" (a newly created ref).
 Z40 = "0" * 40
@@ -481,73 +478,12 @@ def _run_gitleaks(
     return leaks_found
 
 
-def _md_code_fence(content: str) -> str:
-    """Return a backtick fence longer than any backtick run in `content`.
-
-    Ensures markdown summaries stay intact even when reports contain backticks.
-    """
-    longest = max((len(m) for m in re.findall(r"`+", content)), default=0)
-    return "`" * max(3, longest + 1)
-
-
-def _clip_to_budget(content: str, budget_bytes: int) -> tuple[str, bool]:
-    """Return `content` clipped to `budget_bytes`, and whether it was clipped.
-
-    Clips on a line boundary so a report never ends mid-record.
-    """
-    encoded = content.encode("utf-8")
-    if len(encoded) <= budget_bytes:
-        return content, False
-    if budget_bytes <= 0:
-        return "", True
-    clipped = encoded[:budget_bytes].decode("utf-8", errors="ignore")
-    last_newline = clipped.rfind("\n")
-    return (clipped[: last_newline + 1] if last_newline != -1 else clipped), True
-
-
 def _emit_non_sarif_reports(
     non_sarif: list[_ReportTarget],
     append_step_summary: Callable[[str], None],
 ) -> None:
-    """Surface each non-SARIF report in the workflow run.
-
-    Every report reaches the job log in full and is uploaded as an artifact by
-    the workflow; only the job summary is budgeted, since GitHub discards
-    summaries that run past its size limit.
-    """
-    summary_chunks: list[str] = []
-    remaining = _STEP_SUMMARY_BUDGET_BYTES
-    for target in non_sarif:
-        path = target.path
-        if not path.is_file():
-            log.warning(
-                "non-SARIF report '%s' missing; skipping log + summary emission",
-                path,
-            )
-            continue
-        content = path.read_text(encoding="utf-8", errors="replace")
-        print(f"::group::Gitleaks report: {path}")
-        print(content)
-        print("::endgroup::")
-
-        shown, clipped = _clip_to_budget(content, remaining)
-        remaining -= len(shown.encode("utf-8"))
-        chunk = f"### Gitleaks report: `{path}`"
-        if shown:
-            fence = _md_code_fence(shown)
-            chunk += f"\n\n{fence}\n{shown}\n{fence}"
-        if clipped:
-            log.warning(
-                "report '%s' exceeds the job-summary budget; summary truncated",
-                path,
-            )
-            chunk += (
-                "\n\n_Truncated to stay under GitHub's job-summary limit. "
-                "The full report is in the uploaded artifact._"
-            )
-        summary_chunks.append(chunk)
-    if summary_chunks:
-        append_step_summary("\n\n".join(summary_chunks))
+    """Surface non-SARIF reports in logs and a size-bounded step summary."""
+    emit_reports("Gitleaks", [t.path for t in non_sarif], append_step_summary)
 
 
 def build_parser() -> argparse.ArgumentParser:

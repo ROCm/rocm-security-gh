@@ -104,6 +104,21 @@ jobs:
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
         with:
           category: "/language:${{ matrix.language }}"
+          output: ${{ runner.temp }}/codeql-results-${{ matrix.language }}
+
+      - name: Upload CodeQL findings
+        # Only pull requests from branches of this repository have a
+        # findings comment to feed; everything else reports through the
+        # Security tab.
+        if: >-
+          always() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-report-${{ matrix.language }}
+          path: ${{ runner.temp }}/codeql-results-${{ matrix.language }}
+          if-no-files-found: ignore
 
   complete:
     name: complete

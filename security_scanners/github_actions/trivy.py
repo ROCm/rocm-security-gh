@@ -39,7 +39,6 @@ import fnmatch
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -56,6 +55,7 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
+from security_scanners.utils.step_summary import emit_reports
 from security_scanners.utils.scanner_config import (
     find_config_change,
     resolve_ignore_file,
@@ -170,33 +170,12 @@ class _ReportTarget:
     path: Path
 
 
-def _md_code_fence(content: str) -> str:
-    """Return a fence longer than any backtick run in `content`."""
-    longest = max((len(m) for m in re.findall(r"`+", content)), default=0)
-    return "`" * max(3, longest + 1)
-
-
 def _emit_non_sarif_reports(
     non_sarif: list[_ReportTarget],
     append_step_summary: Callable[[str], None],
 ) -> None:
-    """Surface non-SARIF reports in logs and step summary."""
-    summary_chunks: list[str] = []
-    for target in non_sarif:
-        path = target.path
-        if not path.is_file():
-            log.warning("Non-SARIF report '%s' missing; skipping", path)
-            continue
-        content = path.read_text(encoding="utf-8", errors="replace")
-        print(f"::group::Trivy report: {path}")
-        print(content)
-        print("::endgroup::")
-        fence = _md_code_fence(content)
-        summary_chunks.append(
-            f"### Trivy report: `{path}`\n\n{fence}\n{content}\n{fence}"
-        )
-    if summary_chunks:
-        append_step_summary("\n\n".join(summary_chunks))
+    """Surface non-SARIF reports in logs and a size-bounded step summary."""
+    emit_reports("Trivy", [t.path for t in non_sarif], append_step_summary)
 
 
 def get_trivy_binary() -> Path:

@@ -238,6 +238,10 @@ dangerous sink several functions away from where it entered.
   Security is licensed there. The planning and `complete` jobs still succeed
   and report that CodeQL was intentionally disabled; the other scanners
   continue normally.
+- C and C++ CodeQL is temporarily skipped when the repository contains more
+  than 1,000 C/C++ source and header files because the standard runner cannot
+  reliably build a larger database. Scheduled scans have the same limit until
+  larger runners are available.
 
 For example, a repository that vendors dependencies under
 `build_tools/third_party` can keep `.github/codeql/codeql-config.yml`:
@@ -273,13 +277,14 @@ two sources because neither is enough alone:
 PRs (including fork PRs) and trusted/scheduled runs should request
 different things:
 
-- **PR-time scans** should request `report_formats: human` and grant only
-  `contents: read`. Each scanner resolves that to its own
+- **PR-time scans** should request `report_formats: human` and grant
+  `contents: read`, plus `actions: read` and `pull-requests: write` for
+  the findings comment. Each scanner resolves `human` to its own
   reviewer-readable format, so there is nothing per-tool to remember.
   Findings are uploaded as a build artifact and printed to the job
-  summary for a human to review; nothing touches the Security tab, so
-  fork PRs (which never receive elevated tokens) work identically to
-  same-repo PRs.
+  summary for a human to review; nothing touches the Security tab. Fork
+  PRs scan identically but get no comment, because their token is
+  read-only.
 - **Trusted scans** (`schedule`, `workflow_dispatch`, `push` to the default
   branch) should request `report_formats: sarif` and grant both
   `contents: read` and `security-events: write` so findings land in
@@ -300,10 +305,33 @@ every repository -- no per-scanner jobs to add or maintain.
      contents: read
    jobs:
      security:
+       permissions:
+         contents: read
+         actions: read
+         pull-requests: write
        uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1.0.0
        with:
          report_formats: human
    ```
+
+   On pull requests from branches of the repository, the baseline posts one
+   comment listing the findings on lines the PR added or modified, and
+   updates it in place on every push. The two extra permissions are what
+   enable it, and they must be granted on the `uses:` job: a reusable
+   workflow cannot grant itself more than its caller does. Without them the
+   scan runs exactly as before and the comment job logs a warning instead
+   of posting. PRs from forks are scanned but never commented on, because
+   GitHub gives them a read-only token that no workflow can raise.
+
+   “New” means a finding whose reported range overlaps an added or modified
+   PR line. A file-level finding without line information qualifies when
+   its file changed. This is changed-line filtering, not a comparison of
+   findings from separate base and head scans. GitHub may omit patches for
+   binary or very large diffs, and scanners may no-op or be skipped by
+   policy; the comment lists what it could not cover, and the workflow run
+   remains the complete source. CodeQL findings are also absent for private
+   repositories and repositories covered by the C/C++ size limit described
+   above. The comment job is advisory and never fails the workflow.
 
    By default, this runs for the `pull_request` event's `opened`,
    `synchronize` and `reopened` activity types. To rerun the scanners

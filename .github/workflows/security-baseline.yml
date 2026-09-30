@@ -39,7 +39,9 @@ on:
           gitleaks, plain for zizmor), so PR-time callers don't need to
           know per-tool format names. Native names ('json', 'csv',
           'plain', ...) still work but are only valid for the scanners
-          that support them.
+          that support them. On pull requests from branches of the
+          calling repository every scanner also emits json, which the
+          findings-comment job reads.
         required: false
         type: string
         default: sarif
@@ -193,7 +195,11 @@ jobs:
         env:
           SCANNER_MODULE: ${{ matrix.module }}
           SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
-          SCANNER_REPORT_FORMATS: ${{ inputs.report_formats }}
+          SCANNER_REPORT_FORMATS: >-
+            ${{ github.event_name == 'pull_request' &&
+            github.event.pull_request.head.repo.full_name == github.repository &&
+            format('{0},json', inputs.report_formats) ||
+            inputs.report_formats }}
           SCANNER_BANDIT_CONFIG_PATH: ${{ inputs.bandit_config_path }}
           SCANNER_GITLEAKS_CONFIG_PATH: ${{ inputs.gitleaks_config_path }}
           SCANNER_TRIVY_CONFIG_PATH: ${{ inputs.trivy_config_path }}
@@ -217,3 +223,35 @@ jobs:
           name: ${{ matrix.scanner }}-report
           path: ${{ steps.scan.outputs.non_sarif_paths }}
           if-no-files-found: ignore
+
+  findings-comment:
+    name: Post PR findings
+    needs: [scan, codeql]
+    if: >-
+      !cancelled() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      ((github.event.action != 'labeled' &&
+      github.event.action != 'unlabeled') ||
+      inputs.run_on_label_change)
+    # Reporting is advisory; it must never be what blocks a merge.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Update pull request findings comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m security_scanners.utils.post_pr_findings
