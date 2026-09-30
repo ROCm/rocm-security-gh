@@ -477,7 +477,12 @@ class GitHubApiErrorTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def _run(self, api: "FakeApi", event_name: str = "pull_request") -> tuple[int, str]:
+    def _run(
+        self,
+        api: "FakeApi",
+        event_name: str = "pull_request",
+        scan_mode: str = "changed",
+    ) -> tuple[int, str]:
         with tempfile.TemporaryDirectory() as directory:
             event_path = os.path.join(directory, "event.json")
             with open(event_path, "w", encoding="utf-8") as event_file:
@@ -488,6 +493,7 @@ class MainTest(unittest.TestCase):
                 "GITHUB_REPOSITORY": "ROCm/example",
                 "GITHUB_RUN_ID": "42",
                 "GITHUB_TOKEN": "token",
+                "SCANNER_SCAN_MODE": scan_mode,
             }
             with (
                 mock.patch.dict(os.environ, environment),
@@ -535,6 +541,25 @@ class MainTest(unittest.TestCase):
         self.assertIn(
             "https://github.com/ROCm/example/actions/runs/42", str(body["body"])
         )
+
+    def test_scopes_gitleaks_to_pull_request_commits_only_in_changed_mode(self):
+        for scan_mode, expected in (
+            ("changed", frozenset({"Gitleaks"})),
+            ("all", frozenset()),
+            ("", frozenset()),
+        ):
+            with self.subTest(scan_mode=scan_mode):
+                api = FakeApi()
+                api.responses[("GET", "/repos/ROCm/example/pulls/7")] = pull_payload()
+                with mock.patch.object(
+                    post_pr_findings,
+                    "filter_changed_findings",
+                    wraps=post_pr_findings.filter_changed_findings,
+                ) as spy:
+                    self._run(api, scan_mode=scan_mode)
+                self.assertEqual(
+                    spy.call_args.kwargs["commit_scoped_scanners"], expected
+                )
 
 
 if __name__ == "__main__":

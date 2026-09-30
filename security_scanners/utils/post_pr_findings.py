@@ -249,15 +249,7 @@ def resolve_pull_request(
     run_id: int,
     run_url: str,
 ) -> PullRequestContext:
-    """Identify the pull request this run scanned, from the run's own event.
-
-    `event` is the `pull_request` payload GitHub wrote for this run. A pull
-    request opened from a fork is skipped: its token is read-only and no
-    workflow can raise it, so a comment could never be written. The head
-    commit named in the event is what the scan checked out; if the API already
-    reports a different head, a push has superseded this run and it skips
-    rather than pairing its findings with a newer diff.
-    """
+    """Identify the pull request this run scanned, from the run's own event."""
 
     pull_event = _object(event.get("pull_request"))
     if pull_event is None:
@@ -656,6 +648,17 @@ def _run_id(value: str) -> int:
     return run_id
 
 
+def _commit_scoped_scanners(scan_mode: str) -> frozenset[str]:
+    """Return the scanners whose findings all come from the PR's commits.
+
+    In `changed` mode Gitleaks scans `base..head`, so its findings need no
+    changed-line filtering. In `all` mode it scans the full history, and any
+    other or unknown mode falls back to the changed-line filter.
+    """
+
+    return frozenset({"Gitleaks"}) if scan_mode == "changed" else frozenset()
+
+
 def main() -> int:
     """Report this run's findings on the pull request it scanned."""
 
@@ -684,7 +687,13 @@ def main() -> int:
         require_unchanged_head(api, context)
         changed_files = changed_files_from_api(file_payloads)
         collection = collect_findings(api, context)
-        filtered = filter_changed_findings(collection.findings, changed_files)
+        filtered = filter_changed_findings(
+            collection.findings,
+            changed_files,
+            commit_scoped_scanners=_commit_scoped_scanners(
+                os.environ.get("SCANNER_SCAN_MODE", "")
+            ),
+        )
         reasons = list(collection.incomplete_reasons)
         reasons.extend(job_coverage_reasons(api, context, collection.observed_scanners))
         gap = file_list_gap_reason(len(file_payloads), context.changed_file_count)

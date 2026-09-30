@@ -254,4 +254,5 @@ jobs:
       - name: Update pull request findings comment
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
         run: python -m security_scanners.utils.post_pr_findings

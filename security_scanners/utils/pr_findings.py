@@ -21,6 +21,8 @@ _REASONS_BUDGET_CHARS = 10_000
 # Room for the "N additional finding(s) are omitted" line and its blank line.
 _OMITTED_LINE_RESERVE_CHARS = 100
 
+# A full or abbreviated git object ID, e.g. Gitleaks's "Commit" field.
+_COMMIT_RE = re.compile(r"[0-9a-f]{7,64}")
 # The new-side start line of a unified-diff hunk header, e.g. the "9" in
 # "@@ -4,3 +9,2 @@ def example():". A trailing section heading is ignored.
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(?P<start>\d+)(?:,\d+)? @@")
@@ -46,6 +48,9 @@ class Finding:
     end_line: int | None
     message: str
     fingerprint: str = ""
+    commit: str = ""
+    # A credential or other secret, which must be rotated rather than fixed.
+    secret: bool = False
 
 
 @dataclass(frozen=True)
@@ -174,6 +179,7 @@ def parse_gitleaks(data: object) -> list[Finding]:
         rule_id = _string(item.get("RuleID")) or "gitleaks"
         message = _string(item.get("Description")) or "Potential secret"
         start, end = _line_range(item.get("StartLine"), item.get("EndLine"))
+        commit = _string(item.get("Commit"), limit=64).lower()
         if path:
             findings.append(
                 Finding(
@@ -185,6 +191,8 @@ def parse_gitleaks(data: object) -> list[Finding]:
                     end_line=end,
                     message=message,
                     fingerprint=_string(item.get("Fingerprint")),
+                    commit=commit if _COMMIT_RE.fullmatch(commit) else "",
+                    secret=True,
                 )
             )
     return findings
@@ -277,6 +285,7 @@ def parse_trivy(data: object) -> list[Finding]:
                             start_line=start,
                             end_line=end,
                             message=_trivy_message(item, kind),
+                            secret=kind == "Secret",
                         )
                     )
     return findings
@@ -521,12 +530,28 @@ def _deduplicate(findings: Sequence[Finding]) -> list[Finding]:
 def filter_changed_findings(
     findings: Sequence[Finding],
     changed_files: Mapping[str, ChangedFile],
+    *,
+    commit_scoped_scanners: frozenset[str] = frozenset(),
 ) -> FilterResult:
-    """Keep findings that overlap added or modified pull request lines."""
+    """Keep findings that overlap added or modified pull request lines.
+
+    A scanner in `commit_scoped_scanners` already limited itself to the pull
+    request's own commits, so every finding it reports was introduced by the
+    pull request and is kept as is. Gitleaks in `changed` mode scans
+    `base..head` that way, and a secret added in one commit and deleted in a
+    later one is still in the history even though no line of the final diff
+    shows it.
+
+    Secrets sort first, then by severity, so they are never the rows a size
+    or row limit drops.
+    """
 
     matched: list[Finding] = []
     unfilterable: set[str] = set()
     for finding in findings:
+        if finding.scanner in commit_scoped_scanners:
+            matched.append(finding)
+            continue
         changed = changed_files.get(finding.path)
         if changed is None or changed.status == "removed":
             continue
@@ -539,6 +564,7 @@ def filter_changed_findings(
     ordered = sorted(
         _deduplicate(matched),
         key=lambda item: (
+            not item.secret,
             _SEVERITY_RANK.get(item.severity, _SEVERITY_RANK["UNKNOWN"]),
             item.path,
             item.start_line or 0,
@@ -587,7 +613,10 @@ def _location_link(repository: str, head_sha: str, finding: Finding) -> str:
     if len(finding.path) > 160:
         return label
     path_url = quote(finding.path, safe="/")
-    url = f"https://github.com/{repository}/blob/{head_sha}/{path_url}{fragment}"
+    # A finding from history links to the commit that contains it; the head
+    # may no longer have the file or the line.
+    ref = finding.commit or head_sha
+    url = f"https://github.com/{repository}/blob/{ref}/{path_url}{fragment}"
     return f"[{label}]({url})"
 
 
@@ -640,6 +669,25 @@ def render_comment(
         ),
         "",
     ]
+    secret_count = sum(finding.secret for finding in findings)
+    if secret_count:
+        header.extend(
+            [
+                "> [!CAUTION]",
+                f"> **{secret_count} potential secret finding(s) were committed "
+                "in this pull request.** Treat each credential as compromised "
+                "and revoke or rotate it now, even if a later commit removed "
+                "it. Deleting the line or force-pushing does not undo the "
+                "leak: the commits stay reachable from this pull request and "
+                "from every clone or fork, and automated scanners harvest "
+                "secrets pushed to public repositories within minutes.",
+                ">",
+                "> If a finding is a test fixture or a false positive, "
+                "allowlist it in the configuration of the scanner that "
+                "reported it.",
+                "",
+            ]
+        )
 
     footer: list[str] = []
     if incomplete_reasons:

@@ -33,6 +33,7 @@ class ReportParserTest(unittest.TestCase):
                     "StartLine": 12,
                     "EndLine": 13,
                     "Fingerprint": "abc",
+                    "Commit": "0123456789ABCDEF0123456789abcdef01234567",
                 }
             ]
         )
@@ -47,7 +48,49 @@ class ReportParserTest(unittest.TestCase):
                 end_line=13,
                 message="API key",
                 fingerprint="abc",
+                commit="0123456789abcdef0123456789abcdef01234567",
+                secret=True,
             ),
+        )
+
+    def test_drops_a_gitleaks_commit_that_is_not_an_object_id(self):
+        findings = parse_gitleaks(
+            [
+                {
+                    "RuleID": "generic-api-key",
+                    "File": "src/config.py",
+                    "StartLine": 1,
+                    "Commit": "main/../../evil",
+                }
+            ]
+        )
+        self.assertEqual(findings[0].commit, "")
+
+    def test_marks_only_trivy_secrets_as_secrets(self):
+        findings = parse_trivy(
+            {
+                "Results": [
+                    {
+                        "Target": "config/.env",
+                        "Secrets": [
+                            {
+                                "RuleID": "aws-access-key-id",
+                                "Severity": "CRITICAL",
+                                "Title": "AWS Access Key ID",
+                                "StartLine": 3,
+                                "EndLine": 3,
+                            }
+                        ],
+                        "Vulnerabilities": [
+                            {"VulnerabilityID": "CVE-2026-1", "Severity": "HIGH"}
+                        ],
+                    }
+                ]
+            }
+        )
+        self.assertEqual(
+            {finding.rule_id: finding.secret for finding in findings},
+            {"aws-access-key-id": True, "CVE-2026-1": False},
         )
 
     def test_parses_bandit(self):
@@ -282,6 +325,48 @@ class ChangedLineFilterTest(unittest.TestCase):
             [finding.severity for finding in result.findings], ["CRITICAL", "LOW"]
         )
 
+    def test_keeps_commit_scoped_findings_absent_from_the_final_diff(self):
+        # The secret was added in one commit and deleted in a later one, so
+        # the final diff has neither the file's line nor, here, the file.
+        changed = {
+            "a.py": ChangedFile(
+                path="a.py",
+                status="modified",
+                line_ranges=(LineRange(1, 3),),
+                patch_available=True,
+            )
+        }
+        leaked = Finding(
+            "Gitleaks", "HIGH", "aws", "old.env", 4, 4, "key", commit="abc1234"
+        )
+        self.assertEqual(filter_changed_findings([leaked], changed).findings, ())
+        self.assertEqual(
+            filter_changed_findings(
+                [leaked], changed, commit_scoped_scanners=frozenset({"Gitleaks"})
+            ).findings,
+            (leaked,),
+        )
+
+    def test_sorts_secrets_ahead_of_more_severe_findings(self):
+        changed = {
+            "a.py": ChangedFile(
+                path="a.py",
+                status="modified",
+                line_ranges=(LineRange(1, 3),),
+                patch_available=True,
+            )
+        }
+        result = filter_changed_findings(
+            [
+                Finding("Bandit", "CRITICAL", "B1", "a.py", 1, 1, "critical"),
+                Finding("Trivy", "LOW", "key", "a.py", 2, 2, "key", secret=True),
+            ],
+            changed,
+        )
+        self.assertEqual(
+            [finding.rule_id for finding in result.findings], ["key", "B1"]
+        )
+
     def test_keeps_distinct_rules_sharing_a_location_fingerprint(self):
         # CodeQL's primaryLocationLineHash identifies the line, not the
         # finding, so two rules flagging one line share a fingerprint.
@@ -334,6 +419,44 @@ class RenderCommentTest(unittest.TestCase):
         self.assertNotIn("[next](https://bad)", body)
         self.assertIn("&#64;team", body)
         self.assertIn("src/a%20file.py#L4-L5", body)
+
+    def test_warns_to_rotate_secrets_and_links_to_their_commit(self):
+        findings = [
+            Finding(
+                "Gitleaks",
+                "HIGH",
+                "aws",
+                "old.env",
+                4,
+                4,
+                "AWS key",
+                commit="def5678",
+                secret=True,
+            ),
+            Finding("Trivy", "HIGH", "gh-pat", "a.py", 2, 2, "PAT", secret=True),
+            Finding("Bandit", "HIGH", "B602", "a.py", 9, 9, "shell=True"),
+        ]
+        body = render_comment(
+            findings,
+            repository="ROCm/example",
+            head_sha="abc123",
+            run_url="https://github.com/ROCm/example/actions/runs/1",
+        )
+        self.assertIn("> [!CAUTION]", body)
+        self.assertIn("**2 potential secret finding(s)", body)
+        self.assertIn("revoke or rotate it now", body)
+        self.assertLess(body.index("[!CAUTION]"), body.index("| Scanner |"))
+        self.assertIn("/blob/def5678/old.env#L4", body)
+        self.assertIn("/blob/abc123/a.py#L2", body)
+
+    def test_omits_the_rotation_warning_without_secrets(self):
+        body = render_comment(
+            [Finding("Bandit", "HIGH", "B602", "a.py", 9, 9, "shell=True")],
+            repository="ROCm/example",
+            head_sha="abc123",
+            run_url="https://github.com/ROCm/example/actions/runs/1",
+        )
+        self.assertNotIn("[!CAUTION]", body)
 
     def test_caps_table_at_fifty_rows(self):
         findings = [

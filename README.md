@@ -333,6 +333,13 @@ every repository -- no per-scanner jobs to add or maintain.
    repositories and repositories covered by the C/C++ size limit described
    above. The comment job is advisory and never fails the workflow.
 
+   Secrets are the exception to changed-line filtering. With `scan_mode: changed`, Gitleaks scans every commit the PR adds, so the comment also
+   reports a secret that a later commit deleted, linked to the commit that
+   contains it. Whenever the comment includes a secret, it opens with a
+   caution banner telling the author to revoke or rotate the credential,
+   because deleting the line or force-pushing does not remove it from the
+   history.
+
    By default, this runs for the `pull_request` event's `opened`,
    `synchronize` and `reopened` activity types. To rerun the scanners
    whenever a label is added or removed, subscribe the caller to those
