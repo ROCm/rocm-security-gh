@@ -16,13 +16,10 @@ from gitleaks import (
     _CONFIG_PATH,
     _LEAK_SECURITY_SEVERITY_HIGH,
     _ReportTarget,
-    _STEP_SUMMARY_BUDGET_BYTES,
     _SUPPORTED_FORMATS,
-    _clip_to_budget,
     _determine_log_opts,
     _emit_non_sarif_reports,
     _enrich_sarif_with_security_severity,
-    _md_code_fence,
     _parse_report_formats,
     _resolve_config_path,
     _run_gitleaks,
@@ -481,60 +478,8 @@ class ResolveConfigPathTest(unittest.TestCase):
         self.assertIn(str(self._tooling_root / _CONFIG_PATH), str(ctx.exception))
 
 
-class MdCodeFenceTest(unittest.TestCase):
-    """Tests for `_md_code_fence`."""
-
-    def test_default_three_backticks_when_no_backticks(self):
-        self.assertEqual(_md_code_fence("plain,csv,content"), "```")
-
-    def test_three_backticks_when_content_has_short_runs(self):
-        self.assertEqual(_md_code_fence("a `b` c"), "```")
-
-    def test_grows_beyond_triple_backtick_run(self):
-        self.assertEqual(_md_code_fence("before ``` after"), "````")
-
-    def test_grows_to_longest_run(self):
-        self.assertEqual(_md_code_fence("x ````` y"), "``````")
-
-    def test_fence_actually_wraps_content(self):
-        content = "with ``` inside"
-        fence = _md_code_fence(content)
-        block = f"{fence}\n{content}\n{fence}"
-        # The closing fence must be on its own line and not appear within
-        # the content, so the block is unambiguous.
-        self.assertNotIn(fence, content)
-        self.assertTrue(block.startswith(fence + "\n"))
-        self.assertTrue(block.endswith("\n" + fence))
-
-
-class ClipToBudgetTest(unittest.TestCase):
-    """Tests for `_clip_to_budget`."""
-
-    def test_content_within_budget_is_untouched(self):
-        self.assertEqual(_clip_to_budget("a,b,c\n", 1024), ("a,b,c\n", False))
-
-    def test_oversized_content_is_clipped_on_a_line_boundary(self):
-        content = "".join(f"line{i}\n" for i in range(100))
-        shown, clipped = _clip_to_budget(content, 50)
-        self.assertTrue(clipped)
-        self.assertLessEqual(len(shown.encode("utf-8")), 50)
-        # Clipping mid-record would render a partial finding in the summary.
-        self.assertTrue(shown.endswith("\n"))
-        self.assertTrue(content.startswith(shown))
-
-    def test_exhausted_budget_yields_nothing(self):
-        self.assertEqual(_clip_to_budget("data\n", 0), ("", True))
-
-    def test_clip_never_splits_a_multibyte_character(self):
-        # Two bytes per character and no newline to fall back on, so the
-        # byte-level cut lands mid-character.
-        shown, clipped = _clip_to_budget("é" * 100, 5)
-        self.assertTrue(clipped)
-        self.assertEqual(shown, "éé")
-
-
 class EmitNonSarifReportsTest(unittest.TestCase):
-    """Tests for `_emit_non_sarif_reports`' job-summary budgeting."""
+    """Tests for `_emit_non_sarif_reports`' job-summary emission."""
 
     def _report(self, content: str) -> _ReportTarget:
         tmp = tempfile.mkdtemp()
@@ -543,40 +488,24 @@ class EmitNonSarifReportsTest(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return _ReportTarget(fmt="csv", path=path)
 
-    def test_report_within_budget_is_emitted_in_full(self):
+    def test_report_is_emitted_under_the_gitleaks_heading(self):
         target = self._report("file,secret\na.txt,REDACTED\n")
         appended: list[str] = []
         _emit_non_sarif_reports([target], appended.append)
         (summary,) = appended
+        self.assertIn("### Gitleaks report:", summary)
         self.assertIn("a.txt,REDACTED", summary)
-        self.assertNotIn("Truncated", summary)
 
-    def test_oversized_report_is_truncated_and_points_at_the_artifact(self):
-        target = self._report("".join(f"row{i},REDACTED\n" for i in range(200)))
+    def test_oversized_report_is_truncated_rather_than_dropped(self):
+        # A report far past GitHub's 1 MiB job-summary limit; the summary
+        # must stay under it so GitHub renders the report at all.
+        target = self._report("".join(f"row{i},REDACTED\n" for i in range(200_000)))
         appended: list[str] = []
-        with mock.patch("gitleaks._STEP_SUMMARY_BUDGET_BYTES", 64):
-            _emit_non_sarif_reports([target], appended.append)
+        _emit_non_sarif_reports([target], appended.append)
         (summary,) = appended
+        self.assertLess(len(summary.encode("utf-8")), 1024 * 1024)
         self.assertIn("row0,REDACTED", summary)
-        self.assertNotIn("row199,REDACTED", summary)
         self.assertIn("Truncated", summary)
-        self.assertIn("artifact", summary)
-
-    def test_budget_is_shared_across_reports(self):
-        first = self._report("".join(f"row{i},REDACTED\n" for i in range(50)))
-        second = self._report("second,REDACTED\n")
-        appended: list[str] = []
-        with mock.patch("gitleaks._STEP_SUMMARY_BUDGET_BYTES", 64):
-            _emit_non_sarif_reports([first, second], appended.append)
-        (summary,) = appended
-        # The first report consumes the budget, so the second is announced
-        # but its contents are left to the artifact.
-        self.assertIn("row0,REDACTED", summary)
-        self.assertNotIn("second,REDACTED", summary)
-        self.assertIn(str(second.path), summary)
-
-    def test_default_budget_stays_under_githubs_limit(self):
-        self.assertLess(_STEP_SUMMARY_BUDGET_BYTES, 1024 * 1024)
 
     def test_missing_report_is_skipped_without_a_summary(self):
         target = _ReportTarget(fmt="csv", path=Path("does-not-exist.csv"))
