@@ -18,6 +18,9 @@ MAX_COMMENT_ROWS = 50
 # headroom so a body at the budget is never the one that fails.
 COMMENT_BUDGET_CHARS = 60_000
 _REASONS_BUDGET_CHARS = 10_000
+# Lower severities are mostly false positives or the same issue reported by
+# several scanners; the comment counts them but does not list them.
+_LISTED_SEVERITIES = frozenset({"CRITICAL", "HIGH"})
 # Room for the "N additional finding(s) are omitted" line and its blank line.
 _OMITTED_LINE_RESERVE_CHARS = 100
 
@@ -535,13 +538,6 @@ def filter_changed_findings(
 ) -> FilterResult:
     """Keep findings that overlap added or modified pull request lines.
 
-    A scanner in `commit_scoped_scanners` already limited itself to the pull
-    request's own commits, so every finding it reports was introduced by the
-    pull request and is kept as is. Gitleaks in `changed` mode scans
-    `base..head` that way, and a secret added in one commit and deleted in a
-    later one is still in the history even though no line of the final diff
-    shows it.
-
     Secrets sort first, then by severity, so they are never the rows a size
     or row limit drops.
     """
@@ -613,8 +609,6 @@ def _location_link(repository: str, head_sha: str, finding: Finding) -> str:
     if len(finding.path) > 160:
         return label
     path_url = quote(finding.path, safe="/")
-    # A finding from history links to the commit that contains it; the head
-    # may no longer have the file or the line.
     ref = finding.commit or head_sha
     url = f"https://github.com/{repository}/blob/{ref}/{path_url}{fragment}"
     return f"[{label}]({url})"
@@ -655,21 +649,34 @@ def render_comment(
     max_rows: int = MAX_COMMENT_ROWS,
     budget_chars: int = COMMENT_BUDGET_CHARS,
 ) -> str:
-    """Render a sticky pull request findings comment of bounded size."""
+    """Render a sticky pull request findings comment of bounded size.
 
-    header = [
-        COMMENT_MARKER,
-        "## Security findings on changed lines",
-        "",
-        (
-            f"Found **{len(findings)}** finding(s) located on lines added or "
-            "modified by this pull request."
-            if findings
-            else "No security findings were reported on added or modified lines."
-        ),
-        "",
+    The comment is one summary line that expands to the findings table. Only
+    CRITICAL and HIGH findings, plus secrets of any severity, are listed; the
+    rest are counted and left to the scan run. A secret rotation warning sits
+    above the collapsed block so it is visible without expanding it.
+    """
+
+    listed = [
+        finding
+        for finding in findings
+        if finding.secret or finding.severity in _LISTED_SEVERITIES
     ]
-    secret_count = sum(finding.secret for finding in findings)
+    unlisted_count = len(findings) - len(listed)
+    if not listed:
+        summary = "Security scan found no critical or high findings"
+    elif all(finding.severity in _LISTED_SEVERITIES for finding in listed):
+        summary = f"Security scan found {len(listed)} critical or high finding(s)"
+    else:
+        summary = (
+            f"Security scan found {len(listed)} critical, high, or secret finding(s)"
+        )
+    summary += " on lines changed by this pull request"
+    if incomplete_reasons:
+        summary += " (coverage incomplete)"
+
+    header = [COMMENT_MARKER, ""]
+    secret_count = sum(finding.secret for finding in listed)
     if secret_count:
         header.extend(
             [
@@ -688,8 +695,18 @@ def render_comment(
                 "",
             ]
         )
+    # GitHub renders Markdown inside <details> only after a blank line.
+    header.extend(["<details>", f"<summary><b>{summary}</b></summary>", ""])
 
     footer: list[str] = []
+    if unlisted_count:
+        footer.extend(
+            [
+                f"{unlisted_count} medium, low, or unrated finding(s) are not "
+                "listed; the scan run has them.",
+                "",
+            ]
+        )
     if incomplete_reasons:
         notes = [f"- {_escape_cell(reason)}" for reason in incomplete_reasons]
         kept_notes = _take_within(notes, _REASONS_BUDGET_CHARS)
@@ -709,6 +726,8 @@ def render_comment(
                 "_“New” means the finding is located in a changed file on an "
                 "added or modified line; it is not a base-versus-head findings delta._"
             ),
+            "",
+            "</details>",
         ]
     )
 
@@ -718,7 +737,7 @@ def render_comment(
     ]
     fixed_chars = sum(len(line) + 1 for line in (*header, *table_header, *footer))
     rows = _take_within(
-        [_render_row(repository, head_sha, finding) for finding in findings[:max_rows]],
+        [_render_row(repository, head_sha, finding) for finding in listed[:max_rows]],
         budget_chars - fixed_chars - _OMITTED_LINE_RESERVE_CHARS,
     )
 
@@ -727,7 +746,7 @@ def render_comment(
         lines.extend(table_header)
         lines.extend(rows)
         lines.append("")
-    omitted = len(findings) - len(rows)
+    omitted = len(listed) - len(rows)
     if omitted:
         lines.extend(
             [

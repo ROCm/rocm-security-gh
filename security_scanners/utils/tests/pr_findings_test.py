@@ -445,7 +445,7 @@ class RenderCommentTest(unittest.TestCase):
         self.assertIn("> [!CAUTION]", body)
         self.assertIn("**2 potential secret finding(s)", body)
         self.assertIn("revoke or rotate it now", body)
-        self.assertLess(body.index("[!CAUTION]"), body.index("| Scanner |"))
+        self.assertLess(body.index("[!CAUTION]"), body.index("<details>"))
         self.assertIn("/blob/def5678/old.env#L4", body)
         self.assertIn("/blob/abc123/a.py#L2", body)
 
@@ -460,7 +460,7 @@ class RenderCommentTest(unittest.TestCase):
 
     def test_caps_table_at_fifty_rows(self):
         findings = [
-            Finding("Bandit", "LOW", f"B{index}", "a.py", index, index, "finding")
+            Finding("Bandit", "HIGH", f"B{index}", "a.py", index, index, "finding")
             for index in range(1, 56)
         ]
         body = render_comment(
@@ -503,7 +503,7 @@ class RenderCommentTest(unittest.TestCase):
         self.assertIn("more coverage note(s) are omitted", body)
 
     def test_counts_every_finding_when_no_row_fits(self):
-        findings = [Finding("Bandit", "LOW", "B1", "a.py", 1, 1, "x" * 200)]
+        findings = [Finding("Bandit", "HIGH", "B1", "a.py", 1, 1, "x" * 200)]
         body = render_comment(
             findings,
             repository="ROCm/example",
@@ -513,8 +513,57 @@ class RenderCommentTest(unittest.TestCase):
         )
         self.assertLessEqual(len(body), 600)
         self.assertNotIn("| Scanner |", body)
-        self.assertIn("Found **1** finding(s)", body)
+        self.assertIn("found 1 critical or high finding(s)", body)
         self.assertIn("1 additional finding(s) are omitted", body)
+
+    def test_collapses_the_table_behind_a_one_line_summary(self):
+        body = render_comment(
+            [Finding("Bandit", "HIGH", "B602", "a.py", 9, 9, "shell=True")],
+            repository="ROCm/example",
+            head_sha="abc123",
+            run_url="https://github.com/ROCm/example/actions/runs/1",
+            incomplete_reasons=("CodeQL did not run",),
+        )
+        self.assertIn(
+            "<details>\n<summary><b>Security scan found 1 critical or high "
+            "finding(s) on lines changed by this pull request (coverage "
+            "incomplete)</b></summary>\n\n| Scanner |",
+            body,
+        )
+        self.assertLess(body.index("| Scanner |"), body.index("</details>"))
+        self.assertLess(body.index("CodeQL did not run"), body.index("</details>"))
+        self.assertTrue(body.endswith("</details>"))
+
+    def test_lists_only_critical_high_and_secrets_and_counts_the_rest(self):
+        body = render_comment(
+            [
+                Finding("Bandit", "CRITICAL", "B1", "a.py", 1, 1, "critical"),
+                Finding("Bandit", "HIGH", "B2", "a.py", 2, 2, "high"),
+                Finding("Trivy", "LOW", "gh-pat", "a.py", 3, 3, "PAT", secret=True),
+                Finding("Bandit", "MEDIUM", "B3", "a.py", 4, 4, "medium"),
+                Finding("Bandit", "LOW", "B4", "a.py", 5, 5, "low"),
+                Finding("Trivy", "UNKNOWN", "CVE-1", "a.py", None, None, "unrated"),
+            ],
+            repository="ROCm/example",
+            head_sha="abc123",
+            run_url="https://github.com/ROCm/example/actions/runs/1",
+        )
+        self.assertEqual(body.count("\n| Bandit |") + body.count("\n| Trivy |"), 3)
+        for rule in ("B3", "B4", "CVE-1"):
+            self.assertNotIn(f"| {rule} |", body)
+        self.assertIn("found 3 critical, high, or secret finding(s)", body)
+        self.assertIn("3 medium, low, or unrated finding(s) are not listed", body)
+
+    def test_reports_no_findings_when_only_lower_severities_exist(self):
+        body = render_comment(
+            [Finding("Bandit", "MEDIUM", "B3", "a.py", 4, 4, "medium")],
+            repository="ROCm/example",
+            head_sha="abc123",
+            run_url="https://github.com/ROCm/example/actions/runs/1",
+        )
+        self.assertIn("found no critical or high findings", body)
+        self.assertNotIn("| Scanner |", body)
+        self.assertIn("1 medium, low, or unrated finding(s)", body)
 
 
 if __name__ == "__main__":
