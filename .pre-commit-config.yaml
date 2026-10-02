@@ -1,9 +1,14 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
+#
+# Every `rev` is a full commit SHA, because a tag can be moved to different
+# code. The `# frozen:` comment names the release; Dependabot reads it to
+# bump the SHA and the comment together. `additional_dependencies` are
+# installed from PyPI, so each one carries an exact version.
 
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v3.2.0
+    rev: e1668fe86af3810fbca72b8653fe478e66a0afdc  # frozen: v3.2.0
     hooks:
     -   id: trailing-whitespace
     -   id: end-of-file-fixer
@@ -16,26 +21,26 @@ repos:
     -   id: mixed-line-ending
     -   id: requirements-txt-fixer
 -   repo: https://github.com/psf/black
-    rev: 25.11.0
+    rev: 05f0a8ce1f71fbb36e1e032d3b518c7b945089a2  # frozen: 25.11.0
     hooks:
     -   id: black
 
 - repo: https://github.com/hukkin/mdformat
-  rev: 0.7.21
+  rev: e07e382e3ffaec54080e233ade96a78295881884  # frozen: 0.7.21
   hooks:
   - id: mdformat
     additional_dependencies:
-    - mdformat-gfm
-    - mdformat-black
-    - mdformat-frontmatter
+    - mdformat-gfm==1.0.0
+    - mdformat-black==0.1.1
+    - mdformat-frontmatter==2.1.2
 
 - repo: https://github.com/Lucas-C/pre-commit-hooks
-  rev: v1.5.5
+  rev: a30f0d816e5062a67d87c8de753cfe499672b959  # frozen: v1.5.5
   hooks:
   - id: forbid-tabs
 
 - repo: https://github.com/rhysd/actionlint
-  rev: v1.7.10
+  rev: 0933c147c9d6587653d45fdcb4c497c57a65f9af  # frozen: v1.7.10
   hooks:
     - id: actionlint
       args: [-shellcheck=, -ignore, 'label ".+" is unknown']

@@ -426,12 +426,28 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
+    # Third-party actions wait a week after release, so a compromised or
+    # broken version is usually reported and pulled before it is proposed.
+    # The baseline is exempt and is proposed the next weekday after a tag.
+    cooldown:
+      default-days: 7
+      exclude:
+        - "ROCm/rocm-security-gh*"
+    groups:
+      rocm-security-gh:
+        patterns:
+          - "ROCm/rocm-security-gh*"
+      github-actions:
+        patterns:
+          - "*"
 ```
 
 Security fixes to a scanner reach your repository only once that PR
 merges, so treat these bumps as security updates rather than routine
-dependency noise.
+dependency noise. The separate `rocm-security-gh` group keeps the
+baseline bump in its own PR instead of waiting in one with actions that
+are still cooling down.
 
 The two workflows in this repository call
 `$/.github/workflows/security-baseline.yml` unpinned instead, on purpose:
