@@ -38,6 +38,15 @@ repos:
   rev: a30f0d816e5062a67d87c8de753cfe499672b959  # frozen: v1.5.5
   hooks:
   - id: forbid-tabs
+    # Tabs are syntactically required in make recipes.
+    exclude: |
+      (?x)^(
+        (.*/)?[Mm]akefile(\..*)?|
+        (.*/)?GNUmakefile|
+        .*\.(mk|go)|
+        (.*/)?CODEOWNERS|
+        (.*/)?\.gitmodules
+      )$
 
 - repo: https://github.com/rhysd/actionlint
   rev: 0933c147c9d6587653d45fdcb4c497c57a65f9af  # frozen: v1.7.10
