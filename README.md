@@ -41,8 +41,10 @@ scanner, which means:
   configuration](#per-repository-configuration).
 - **Scanners stay isolated.** Each one gets its own runner, its own
   workspace and its own check run, so no scanner can see another's
-  leftover report files, and an individual scanner can be made a
-  required status check in branch protection.
+  leftover report files. The `Security scanners` completion job succeeds
+  only when scanner planning, every matrix scanner and CodeQL succeed, so
+  branch protection can require that one aggregate check instead of every
+  scanner check.
 - **Callers don't learn per-scanner vocabulary.** The inputs are
   tool-independent and each scanner maps them onto its own flags. Ask
   for `report_formats: human` and every scanner produces whatever its

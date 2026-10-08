@@ -224,6 +224,42 @@ jobs:
           path: ${{ steps.scan.outputs.non_sarif_paths }}
           if-no-files-found: ignore
 
+  complete:
+    name: Security scanners
+    needs: [plan, scan, codeql]
+    permissions: {}
+    if: >-
+      always() &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'labeled' &&
+      github.event.action != 'unlabeled') ||
+      inputs.run_on_label_change)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Report security scanner outcomes
+        env:
+          CODEQL_RESULT: ${{ needs.codeql.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SCANNERS_RESULT: ${{ needs.scan.result }}
+        run: |
+          echo "Scanner planning: ${PLAN_RESULT}"
+          echo "Matrix scanners: ${SCANNERS_RESULT}"
+          echo "CodeQL: ${CODEQL_RESULT}"
+
+          if [[ "${PLAN_RESULT}" != "success" ]]; then
+            echo "::error::Security scanner planning did not succeed"
+            exit 1
+          fi
+          if [[ "${SCANNERS_RESULT}" != "success" ]]; then
+            echo "::error::One or more matrix scanners did not succeed"
+            exit 1
+          fi
+          if [[ "${CODEQL_RESULT}" != "success" ]]; then
+            echo "::error::CodeQL did not succeed"
+            exit 1
+          fi
+
   findings-comment:
     name: Post PR findings
     needs: [scan, codeql]
