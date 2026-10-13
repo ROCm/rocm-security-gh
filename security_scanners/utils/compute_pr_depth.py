@@ -18,7 +18,7 @@ def compute_fetch_depth(payload: Mapping[str, object]) -> str:
     if not isinstance(commits, int) or commits <= 0:
         return "0"
 
-    return str(commits + 1)
+    return str(commits + 2)
 
 
 def main(argv: list[str]) -> int:
