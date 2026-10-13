@@ -11,16 +11,16 @@ from security_scanners.utils.compute_pr_depth import compute_fetch_depth, main
 class ComputeFetchDepthTest(unittest.TestCase):
     """Tests for compute_pr_depth.compute_fetch_depth."""
 
-    def test_pull_request_returns_commits_plus_one(self):
+    def test_pull_request_includes_merge_pr_and_base_commits(self):
         self.assertEqual(
             compute_fetch_depth({"pull_request": {"commits": 3}}),
-            "4",
+            "5",
         )
 
     def test_single_commit_pull_request(self):
         self.assertEqual(
             compute_fetch_depth({"pull_request": {"commits": 1}}),
-            "2",
+            "3",
         )
 
     def test_empty_payload_returns_full_history(self):
