@@ -153,6 +153,21 @@ class ReportParserTest(unittest.TestCase):
         self.assertEqual(findings[1].path, "main.tf")
         self.assertEqual(findings[2].rule_id, "GPL-3.0")
 
+    def test_accepts_trivy_report_without_applicable_targets(self):
+        findings = parse_trivy(
+            {
+                "SchemaVersion": 2,
+                "Trivy": {"Version": "0.70.0"},
+                "ArtifactName": ".scan-target",
+                "ArtifactType": "repository",
+            }
+        )
+        self.assertEqual(findings, [])
+
+    def test_rejects_trivy_report_without_results_or_metadata(self):
+        with self.assertRaisesRegex(ValueError, "empty-report metadata"):
+            parse_trivy({})
+
     def test_parses_zizmor_primary_location(self):
         findings = parse_zizmor(
             [

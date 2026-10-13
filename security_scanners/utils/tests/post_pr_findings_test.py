@@ -223,6 +223,31 @@ class GitHubApiPaginationTest(unittest.TestCase):
 
 
 class CollectionAndCoverageTest(unittest.TestCase):
+    def test_accepts_metadata_only_trivy_report(self):
+        api = FakeApi()
+        artifact_path = "/repos/ROCm/example/actions/runs/42/artifacts"
+        api.keyed[(artifact_path, "artifacts")] = [
+            {"id": 1, "name": "trivy-report", "expired": False},
+        ]
+        api.downloads["/repos/ROCm/example/actions/artifacts/1/zip"] = make_zip(
+            {
+                "trivy-report.json": json.dumps(
+                    {
+                        "SchemaVersion": 2,
+                        "Trivy": {"Version": "0.70.0"},
+                        "ArtifactName": ".scan-target",
+                        "ArtifactType": "repository",
+                    }
+                ).encode()
+            }
+        )
+
+        collected = collect_findings(api, context())  # type: ignore[arg-type]
+
+        self.assertEqual(collected.findings, ())
+        self.assertEqual(collected.observed_scanners, frozenset({"trivy"}))
+        self.assertEqual(collected.incomplete_reasons, ())
+
     def test_records_invalid_and_missing_failed_reports(self):
         api = FakeApi()
         artifact_path = "/repos/ROCm/example/actions/runs/42/artifacts"

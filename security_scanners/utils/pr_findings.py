@@ -247,7 +247,23 @@ def parse_trivy(data: object) -> list[Finding]:
     """Parse a Trivy filesystem JSON object."""
 
     root = _object(data)
-    if root is None or not isinstance(root.get("Results"), list):
+    if root is None:
+        raise ValueError("Trivy report must be a JSON object")
+    results = root.get("Results")
+    if results is None:
+        trivy = _object(root.get("Trivy"))
+        if (
+            _integer(root.get("SchemaVersion")) is None
+            or trivy is None
+            or not _string(trivy.get("Version"))
+        ):
+            raise ValueError(
+                "Trivy report must contain a Results array or empty-report metadata"
+            )
+        # Trivy omits Results when none of its enabled scanners find an
+        # applicable target in the scanned tree.
+        results = []
+    elif not isinstance(results, list):
         raise ValueError("Trivy report must contain a Results array")
     findings: list[Finding] = []
     categories = (
@@ -256,7 +272,7 @@ def parse_trivy(data: object) -> list[Finding]:
         ("Secrets", "Secret", ("RuleID", "Category")),
         ("Licenses", "License", ("Name", "Category")),
     )
-    for result in _objects(root.get("Results")):
+    for result in _objects(results):
         target = normalize_path(result.get("Target"))
         for key, kind, id_keys in categories:
             for item in _objects(result.get(key)):
