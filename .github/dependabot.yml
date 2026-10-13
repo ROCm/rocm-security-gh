@@ -14,23 +14,21 @@ updates:
       - "/.github/actions/*"
     schedule:
       interval: "weekly"
-    commit-message:
-      prefix: "chore"
-      include: "scope"
+      # Wait a week before adopting newly released action versions.
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
-        patterns:
-          - "*"
+        patterns: ["*"]
 
   # Hook revisions in .pre-commit-config.yaml.
   - package-ecosystem: "pre-commit"
     directory: "/"
     schedule:
       interval: "weekly"
-    commit-message:
-      prefix: "chore"
-      include: "scope"
+      # Wait a week before adopting newly released hook versions.
+    cooldown:
+      default-days: 7
     groups:
       pre-commit:
-        patterns:
-          - "*"
+        patterns: ["*"]
