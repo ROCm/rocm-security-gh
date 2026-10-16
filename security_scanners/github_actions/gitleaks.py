@@ -32,6 +32,7 @@ from security_scanners.utils.binary_checksums import (
     download_and_verify_tarball,
     expected_sha256,
 )
+from security_scanners.utils.fork_changes import upstream_commits
 from security_scanners.utils.step_summary import emit_reports
 from security_scanners.utils.scanner_config import (
     resolve_ignore_file,
@@ -211,6 +212,28 @@ def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     )
 
 
+def _exclude_upstream_commits(log_opts: str, source_dir: Path) -> str:
+    """Append `--not <commit>...` so a fork only scans commits it authored.
+
+    Only commits present in the checkout can be named; the merge base
+    always is, the upstream tip only when the range merges upstream.
+    """
+    known = [
+        sha
+        for sha in upstream_commits()
+        if subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"],
+            cwd=source_dir,
+            check=False,
+            capture_output=True,
+        ).returncode
+        == 0
+    ]
+    if not known:
+        return log_opts
+    return f"{log_opts} --not {' '.join(known)}"
+
+
 def _determine_log_opts(
     scan_mode: str,
     event_name: str,
@@ -228,7 +251,8 @@ def _determine_log_opts(
     (e.g. when this script's own repo is checked out at cwd instead).
     """
     if scan_mode == "all":
-        return ""
+        scoped = _exclude_upstream_commits("--all", source_dir)
+        return "" if scoped == "--all" else scoped
 
     if event_name == "pull_request_target":
         raise ValueError(
@@ -271,7 +295,7 @@ def _determine_log_opts(
                 "Increase the checkout `fetch-depth` or ensure the base ref "
                 "is fetchable."
             )
-        return f"{base_sha}..{head_sha}"
+        return _exclude_upstream_commits(f"{base_sha}..{head_sha}", source_dir)
 
     if event_name == "push":
         # Safe: GitHub guarantees `before` and `after` on push events.
@@ -279,9 +303,9 @@ def _determine_log_opts(
         before = push_event["before"]
         after = push_event["after"]
         if before == Z40:
-            log.info("Push created a new ref; falling back to full history scan")
-            return ""
-        return f"{before}..{after}"
+            log.info("Push created a new ref; scanning its history")
+            return _exclude_upstream_commits(after, source_dir)
+        return _exclude_upstream_commits(f"{before}..{after}", source_dir)
 
     raise ValueError(
         f"Cannot derive a diff range for event "

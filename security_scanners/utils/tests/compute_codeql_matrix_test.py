@@ -21,7 +21,7 @@ from security_scanners.utils.compute_codeql_matrix import (
     CodeqlPlan,
     Discovery,
     DiscoveryError,
-    _github_get,
+    github_get,
     build_plan,
     count_cpp_files,
     discover,
@@ -590,7 +590,7 @@ class GithubGetTest(unittest.TestCase):
             "security_scanners.utils.compute_codeql_matrix.urlopen"
         ) as urlopen:
             urlopen.return_value = self._response({"Python": 1})
-            payload = _github_get(
+            payload = github_get(
                 "/repos/ROCm/x/languages",
                 token="t0ken",
                 api_root="https://api.github.com",
@@ -602,7 +602,7 @@ class GithubGetTest(unittest.TestCase):
 
     def test_refuses_a_non_https_api_root(self):
         with self.assertRaises(DiscoveryError):
-            _github_get("/x", token="t", api_root="http://api.github.internal")
+            github_get("/x", token="t", api_root="http://api.github.internal")
 
     def test_retries_a_transient_server_error(self):
         with (
@@ -615,7 +615,7 @@ class GithubGetTest(unittest.TestCase):
                 HTTPError("u", 503, "unavailable", {}, None),  # type: ignore[arg-type]
                 self._response({"Python": 1}),
             ]
-            payload = _github_get(
+            payload = github_get(
                 "/repos/ROCm/x/languages",
                 token="t",
                 api_root="https://api.github.com",
@@ -631,7 +631,7 @@ class GithubGetTest(unittest.TestCase):
         ):
             urlopen.side_effect = URLError("no route")
             with self.assertRaises(DiscoveryError):
-                _github_get("/x", token="t", api_root="https://api.github.com")
+                github_get("/x", token="t", api_root="https://api.github.com")
 
     def test_does_not_retry_an_authentication_failure(self):
         with (
@@ -642,7 +642,7 @@ class GithubGetTest(unittest.TestCase):
         ):
             urlopen.side_effect = HTTPError("u", 401, "unauthorized", {}, None)  # type: ignore[arg-type]
             with self.assertRaises(HTTPError):
-                _github_get("/x", token="t", api_root="https://api.github.com")
+                github_get("/x", token="t", api_root="https://api.github.com")
         self.assertEqual(urlopen.call_count, 1)
 
 
@@ -730,7 +730,7 @@ class MainTest(unittest.TestCase):
         with (
             mock.patch.dict(os.environ, self._env, clear=False),
             mock.patch(
-                "security_scanners.utils.compute_codeql_matrix._github_get",
+                "security_scanners.utils.compute_codeql_matrix.github_get",
                 side_effect=lambda path, **kwargs: api(path),
             ),
         ):

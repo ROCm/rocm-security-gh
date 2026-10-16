@@ -50,6 +50,7 @@ class BuildMatrixTest(unittest.TestCase):
                 "module": "security_scanners.github_actions.gitleaks",
                 "timeout_minutes": 30,
                 "runner": "ubuntu-24.04",
+                "needs_history": True,
             },
         )
 
