@@ -82,7 +82,7 @@ _SUPPORTED_FORMATS: dict[str, str] = {
 # report a reviewer reads" without knowing that trivy spells it 'table',
 # gitleaks 'csv', zizmor 'plain' and bandit 'txt'.
 _FORMAT_ALIASES: dict[str, str] = {"human": "table"}
-_TRIVY_VERSION = "0.70.0"
+_TRIVY_VERSION = "0.71.0"
 _TRIVY_TARBALL_FILENAME = f"trivy_{_TRIVY_VERSION}_Linux-64bit.tar.gz"
 _TRIVY_TARBALL_URL = f"https://rocm-third-party-deps.s3.us-east-2.amazonaws.com/{_TRIVY_TARBALL_FILENAME}"
 _CONFIG_PATH = ".github/scan_tools_configs/trivy.yml"
