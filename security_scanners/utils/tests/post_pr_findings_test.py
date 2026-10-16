@@ -292,6 +292,30 @@ class CollectionAndCoverageTest(unittest.TestCase):
         self.assertIn("no usable", reasons[2])
 
 
+class RollupJobCoverageTest(unittest.TestCase):
+    def test_failed_rollup_jobs_are_not_coverage_notes(self):
+        api = FakeApi()
+        jobs_path = "/repos/ROCm/example/actions/runs/42/jobs"
+        api.keyed[(jobs_path, "jobs")] = [
+            {"name": "Security scan / trivy", "conclusion": "failure"},
+            {"name": "Security scan / codeql / actions", "conclusion": "failure"},
+            {"name": "Security scan / codeql / complete", "conclusion": "failure"},
+            {"name": "codeql / complete", "conclusion": "failure"},
+            {"name": "Security scan / Security scanners", "conclusion": "failure"},
+            {"name": "Security scanners", "conclusion": "failure"},
+        ]
+        reasons = job_coverage_reasons(
+            api, context(), frozenset()  # type: ignore[arg-type]
+        )
+        self.assertEqual(
+            reasons,
+            [
+                "Security scan / trivy concluded with failure.",
+                "Security scan / codeql / actions concluded with failure.",
+            ],
+        )
+
+
 class RequireUnchangedHeadTest(unittest.TestCase):
     def _api(self, payload: object) -> "FakeApi":
         api = FakeApi()
