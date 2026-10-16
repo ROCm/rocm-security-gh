@@ -65,7 +65,7 @@ _SUPPORTED_FORMATS: dict[str, str] = {
 # report a reviewer reads" without knowing that gitleaks spells it 'csv',
 # zizmor 'plain' and trivy 'table'.
 _FORMAT_ALIASES: dict[str, str] = {"human": "plain"}
-_ZIZMOR_VERSION = "1.30.0"
+_ZIZMOR_VERSION = "1.31.1"
 # Mirrored to the rocm-third-party-deps S3 bucket so CI doesn't depend on
 # github.com; the mirrored object's digest is pinned in `checksums.sha256`.
 # Upstream's release filename is unversioned, so the mirror adds the
