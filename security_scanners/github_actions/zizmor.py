@@ -237,7 +237,7 @@ def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str]
         base = _event_str(event, "pull_request", "base", "sha")
         head = _event_str(event, "pull_request", "head", "sha")
         if not base or not head:
-            log.warning("PR event missing base/head SHA; falling back to full scan")
+            log.warning("PR event missing base/head SHA; using the full scan scope")
             return None
         return (base, head)
     if event_name == "push":
@@ -245,16 +245,16 @@ def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str]
         after = _event_str(event, "after")
         if not before or not after:
             log.warning(
-                "Push event missing before/after SHA; falling back to full scan"
+                "Push event missing before/after SHA; using the full scan scope"
             )
             return None
         # All-zero SHA means a new ref: nothing to diff against.
         if set(before) <= {"0"}:
-            log.info("Push created a new ref; falling back to full scan")
+            log.info("Push created a new ref; using the full scan scope")
             return None
         return (before, after)
     log.info(
-        "Event '%s' has no diff range; falling back to full scan",
+        "Event '%s' has no diff range; using the full scan scope",
         event_name or "<unset>",
     )
     return None
@@ -339,7 +339,7 @@ def _determine_changed_audited_files(
         )
     except subprocess.CalledProcessError as exc:
         log.warning(
-            "git diff %s..%s failed (rc=%s, stderr=%r); falling back to full scan",
+            "git diff %s..%s failed (rc=%s, stderr=%r); using the full scan scope",
             base_sha,
             head_sha,
             exc.returncode,
@@ -352,7 +352,7 @@ def _determine_changed_audited_files(
     if config_change is not None:
         log.info(
             "Changed config (%s) applies to every workflow, so this run "
-            "audits the whole tree instead of the changed files alone",
+            "audits every workflow in scope instead of the changed files alone",
             config_change,
         )
         return None
