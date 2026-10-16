@@ -26,6 +26,51 @@ from zizmor import (
     get_zizmor_binary,
     main,
 )
+from security_scanners.utils.fork_changes import fork_only_files
+
+
+class ForkOnlyFilesTest(unittest.TestCase):
+    """`all` mode on a fork audits only the files the fork changed."""
+
+    def test_audits_only_the_forks_own_workflows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflows = root / ".github" / "workflows"
+            workflows.mkdir(parents=True)
+            (workflows / "ours.yml").write_text("", encoding="utf-8")
+            (workflows / "theirs.yml").write_text("", encoding="utf-8")
+            changes = root / "fork-changes.txt"
+            changes.write_text(
+                ".github/workflows/ours.yml\nREADME.md\n", encoding="utf-8"
+            )
+            with mock.patch.dict(
+                os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+            ):
+                files = fork_only_files(root, root, _is_audited_path)
+        self.assertEqual(files, [workflows / "ours.yml"])
+
+    def test_outside_a_fork_audits_the_whole_tree(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(fork_only_files(Path("."), Path("."), _is_audited_path))
+
+    def test_new_ref_push_uses_the_fork_file_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workflow = root / ".github" / "workflows" / "ours.yml"
+            workflow.parent.mkdir(parents=True)
+            workflow.write_text("", encoding="utf-8")
+            changes = root / "fork-changes.txt"
+            changes.write_text(".github/workflows/ours.yml\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+            ):
+                files = _determine_changed_audited_files(
+                    event_name="push",
+                    event={"before": "0" * 40, "after": "def"},
+                    scan_path=root,
+                    checkout_root=root,
+                )
+        self.assertEqual(files, [workflow])
 
 
 class MainTest(unittest.TestCase):
@@ -282,6 +327,17 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
 
     def test_config_change_alongside_other_files_still_widens(self):
         self.assertIsNone(self._changed("README.md\nzizmor.yml\n"))
+
+    def test_config_change_on_a_fork_widens_only_to_fork_files(self):
+        workflow = Path(".github/workflows/ours.yml")
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("", encoding="utf-8")
+        changes = Path("fork-changes.txt")
+        changes.write_text("zizmor.yml\n.github/workflows/ours.yml\n", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes.resolve())}
+        ):
+            self.assertEqual(self._changed("zizmor.yml\n"), [workflow])
 
     def test_explicit_nested_config_change_widens(self):
         with mock.patch("zizmor.subprocess.run") as run:

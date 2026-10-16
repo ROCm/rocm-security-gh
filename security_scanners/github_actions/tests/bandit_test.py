@@ -18,6 +18,7 @@ from bandit import (
     _CONFIG_PATH,
     _SEVERITY_ORDER,
     _determine_changed_python_files,
+    _is_python_path,
     _diff_range,
     _enrich_sarif_with_security_severity,
     _parse_report_formats,
@@ -26,6 +27,7 @@ from bandit import (
     get_bandit_binary,
     main,
 )
+from security_scanners.utils.fork_changes import fork_only_files
 
 
 class MainTest(unittest.TestCase):
@@ -234,6 +236,67 @@ class DiffRangeTest(unittest.TestCase):
         self.assertIsNone(_diff_range("workflow_dispatch", {}))
 
 
+class ForkFilterTest(unittest.TestCase):
+    """On a fork, only files that differ from upstream are scanned."""
+
+    def test_files_that_only_came_from_upstream_are_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "ours.py").write_text("", encoding="utf-8")
+            Path(tmp, "theirs.py").write_text("", encoding="utf-8")
+            changes = Path(tmp, "fork-changes.txt")
+            changes.write_text("ours.py\n", encoding="utf-8")
+            with (
+                mock.patch.dict(
+                    os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+                ),
+                mock.patch("bandit.subprocess.run") as run,
+            ):
+                run.side_effect = [
+                    mock.Mock(returncode=0, stdout="", stderr=""),
+                    mock.Mock(returncode=0, stdout="ours.py\ntheirs.py\n", stderr=""),
+                ]
+                files = _determine_changed_python_files(
+                    event_name="push",
+                    event={"before": "abc", "after": "def"},
+                    scan_path=Path(tmp),
+                    checkout_root=Path(tmp),
+                )
+        self.assertEqual(files, [Path(tmp, "ours.py")])
+
+    def test_all_mode_scans_only_the_forks_own_python_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("ours.py", "notes.md"):
+                Path(tmp, name).write_text("", encoding="utf-8")
+            changes = Path(tmp, "fork-changes.txt")
+            changes.write_text("ours.py\nnotes.md\ngone.py\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+            ):
+                files = fork_only_files(Path(tmp), Path(tmp), _is_python_path)
+        self.assertEqual(files, [Path(tmp, "ours.py")])
+
+    def test_all_mode_outside_a_fork_scans_the_whole_tree(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(fork_only_files(Path("."), Path("."), _is_python_path))
+
+    def test_new_ref_push_uses_the_fork_file_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp, "ours.py")
+            source.write_text("", encoding="utf-8")
+            changes = Path(tmp, "fork-changes.txt")
+            changes.write_text("ours.py\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+            ):
+                files = _determine_changed_python_files(
+                    event_name="push",
+                    event={"before": "0" * 40, "after": "def"},
+                    scan_path=Path(tmp),
+                    checkout_root=Path(tmp),
+                )
+        self.assertEqual(files, [source])
+
+
 class ConfigChangeWidensTheScanTest(unittest.TestCase):
     """A PR that only edits the bandit config must still exercise it."""
 
@@ -266,6 +329,15 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
 
     def test_config_change_alongside_other_files_still_widens(self):
         self.assertIsNone(self._changed("README.md\nbandit.yaml\n"))
+
+    def test_config_change_on_a_fork_widens_only_to_fork_files(self):
+        Path("ours.py").write_text("", encoding="utf-8")
+        changes = Path("fork-changes.txt")
+        changes.write_text("bandit.yaml\nours.py\n", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes.resolve())}
+        ):
+            self.assertEqual(self._changed("bandit.yaml\n"), [Path("ours.py")])
 
     def test_explicit_nested_config_change_widens(self):
         with mock.patch("bandit.subprocess.run") as run:

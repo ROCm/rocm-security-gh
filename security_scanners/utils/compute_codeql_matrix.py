@@ -369,7 +369,7 @@ def build_plan(
     )
 
 
-def _github_get(path: str, *, token: str, api_root: str) -> object:
+def github_get(path: str, *, token: str, api_root: str) -> object:
     """GET a GitHub REST path and parse the JSON body.
 
     Retries the statuses GitHub returns while a request is merely
@@ -693,7 +693,7 @@ def main(argv: Sequence[str]) -> int:
     api_root = os.environ.get("GITHUB_API_URL") or "https://api.github.com"
 
     def fetcher(path: str) -> object:
-        return _github_get(path, token=token, api_root=api_root)
+        return github_get(path, token=token, api_root=api_root)
 
     event: Mapping[str, object] = {}
     if os.environ.get("GITHUB_EVENT_PATH"):
