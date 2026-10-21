@@ -119,6 +119,47 @@ preserves the conventional-location discovery and fallback in the table
 above. CodeQL config is intentionally explicit; omitting
 `codeql_config_path` leaves the CodeQL action on its defaults.
 
+#### Ignoring findings
+
+Each scanner has its own way to record a finding as triaged. Two of them
+use a dedicated ignore file; the others suppress through a comment next to
+the code or an entry in the scanner's config:
+
+| Scanner  | Ignore file                     | Inline suppression                             | In the scanner's config                       |
+| -------- | ------------------------------- | ---------------------------------------------- | --------------------------------------------- |
+| gitleaks | `.gitleaksignore`, fingerprints | `gitleaks:allow` comment on the line           | `[[allowlists]]`                              |
+| trivy    | `.trivyignore`, finding IDs     | --                                             | `scan.skip-dirs`, `scan.skip-files`           |
+| bandit   | none                            | `# nosec <test ID>` comment on the line        | `skips`, `tests`, `exclude_dirs`              |
+| zizmor   | none                            | `# zizmor: ignore[<rule>]` comment on the line | `rules.<rule>.ignore`, `rules.<rule>.disable` |
+
+The syntax for each is documented in the comments of the scanner's default
+config under `.github/scan_tools_configs/`, which is also the starting
+point to copy into a repository.
+
+Where the ignore file lives follows the config:
+
+- With no explicit config path, `.gitleaksignore` and `.trivyignore` are
+  read from the repository root, where the tools themselves look.
+- With an explicit `gitleaks_config_path` or `trivy_config_path`, the
+  ignore file is looked for in the same directory as that config first, then
+  at the repository root. For
+  `trivy_config_path: .github/scan_tools_configs/trivy.yml` that is
+  `.github/scan_tools_configs/.trivyignore`, then `.trivyignore`.
+- Trivy uses the first file found on its own and never merges, so a
+  `.trivyignore` beside the config replaces a root-level one. Gitleaks also
+  reads `.gitleaksignore` from the directory it scans on its own (the
+  repository root unless `scan_path` is set), so a root-level file stays in
+  effect alongside the one beside the config and their entries combine.
+- The wrapper only searches beside a config that was passed explicitly. A
+  same-named file beside an automatically discovered config is not selected
+  on that basis. Independently, gitleaks itself reads `.gitleaksignore` from
+  the directory named by `scan_path`, including when that is a subdirectory.
+
+The scan log names the ignore file used. A PR that adds, edits or deletes a
+Trivy ignore file in either location is scanned in full, so the suppression
+is exercised by the PR that introduces it. Gitleaks scans the full commit
+range anyway.
+
 This covers detection: allowlists, excluded paths, per-rule
 suppressions, and the fingerprints of findings already triaged. It does
 not cover which scanners run or which severity fails the build, which

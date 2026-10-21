@@ -79,6 +79,8 @@ _CONFIG_PATH = ".github/scan_tools_configs/gitleaks.toml"
 # until the next full-history run.
 _CONFIG_CANDIDATES: tuple[str, ...] = ("gitleaks.toml", ".gitleaks.toml")
 # Fingerprint suppressions for findings a repository has already triaged.
+# Read from the directory of an explicitly configured config, then from
+# the repository root (see `ignore_file_paths`).
 _IGNORE_FILENAME = ".gitleaksignore"
 # Pin --exit-code to 1 so we can tell clean (0) from leaks (1) from a
 # gitleaks error (>1).
@@ -540,7 +542,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional gitleaks config path relative to --checkout-root. "
             "When omitted, conventional root-level names are discovered "
-            "before falling back to the baseline default."
+            "before falling back to the baseline default. "
+            f"{_IGNORE_FILENAME} is read from the same directory as an "
+            "explicit config, else from --checkout-root."
         ),
     )
     return p
@@ -573,6 +577,7 @@ def main(argv: list[str]) -> int:
             scanner="gitleaks",
             checkout_root=checkout_root,
             filename=_IGNORE_FILENAME,
+            configured_path=args.config_path,
         )
         # Only 'changed' mode derives a git range from the event, so 'all'
         # mode is handed no payload at all rather than one it ignores:

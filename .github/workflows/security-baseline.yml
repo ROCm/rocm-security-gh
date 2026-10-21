@@ -75,7 +75,8 @@ on:
           Optional path to the repository's gitleaks TOML config,
           relative to the repository root. When omitted, conventional
           root-level names are discovered before the baseline default is
-          used.
+          used. .gitleaksignore is read from this file's directory, then
+          from the repository root.
         required: false
         type: string
         default: ""
@@ -84,6 +85,8 @@ on:
           Optional path to the repository's trivy YAML config, relative
           to the repository root. When omitted, conventional root-level
           names are discovered before the baseline default is used.
+          .trivyignore is read from this file's directory, then from the
+          repository root.
         required: false
         type: string
         default: ""

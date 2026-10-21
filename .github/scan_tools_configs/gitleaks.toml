@@ -13,8 +13,17 @@
 # The `[extend]` section inherits Gitleaks' built-in rules, and the
 # `[[allowlists]]` below apply to every rule.
 #
-# Use `.gitleaksignore` for one-off finding fingerprints. Add recurring path
-# or regex exclusions to `[[allowlists]]` in this file.
+# Ways to suppress a finding, narrowest first:
+#
+#   1. `gitleaks:allow` on the offending line:
+#          api_key = "not-a-real-key"  # gitleaks:allow
+#
+#   2. `.gitleaksignore` with one finding fingerprint per line:
+#          3f2a9c1e...:tests/fixtures/creds.py:generic-api-key:12
+#      Keep it beside an explicitly configured `gitleaks.toml`, or at the
+#      repository root. When both apply, their entries combine.
+#
+#   3. `[[allowlists]]` below for recurring paths, regexes or stopwords.
 
 title = "rocm-security-gh gitleaks config"
 

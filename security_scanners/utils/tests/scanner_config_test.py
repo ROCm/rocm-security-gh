@@ -7,6 +7,7 @@ from pathlib import Path
 
 from security_scanners.utils.scanner_config import (
     find_config_change,
+    ignore_file_paths,
     resolve_ignore_file,
     resolve_scanner_config,
     scanner_config_paths,
@@ -222,6 +223,121 @@ class ResolveIgnoreFileTest(unittest.TestCase):
             ),
             ignore_file,
         )
+
+    def test_ignore_file_beside_an_explicit_config_is_found(self):
+        beside = self._target_root / "security_tools" / ".toolignore"
+        beside.parent.mkdir()
+        beside.write_text("fingerprint-1\n", encoding="utf-8")
+        self.assertEqual(
+            resolve_ignore_file(
+                scanner="tool",
+                checkout_root=self._target_root,
+                filename=".toolignore",
+                configured_path="security_tools/tool.yml",
+            ),
+            beside,
+        )
+
+    def test_ignore_file_beside_the_config_wins_over_the_root_one(self):
+        # Only one path is returned, never both.
+        beside = self._target_root / "security_tools" / ".toolignore"
+        beside.parent.mkdir()
+        beside.write_text("beside\n", encoding="utf-8")
+        (self._target_root / ".toolignore").write_text("root\n", encoding="utf-8")
+        self.assertEqual(
+            resolve_ignore_file(
+                scanner="tool",
+                checkout_root=self._target_root,
+                filename=".toolignore",
+                configured_path="security_tools/tool.yml",
+            ),
+            beside,
+        )
+
+    def test_root_ignore_file_still_applies_to_an_explicit_config(self):
+        root_ignore = self._target_root / ".toolignore"
+        root_ignore.write_text("root\n", encoding="utf-8")
+        (self._target_root / "security_tools").mkdir()
+        self.assertEqual(
+            resolve_ignore_file(
+                scanner="tool",
+                checkout_root=self._target_root,
+                filename=".toolignore",
+                configured_path="security_tools/tool.yml",
+            ),
+            root_ignore,
+        )
+
+    def test_ignore_file_beside_an_unconfigured_config_is_not_searched(self):
+        # Without an explicit path the only location is the root, so a
+        # same-named file in a subdirectory is just another file.
+        nested = self._target_root / "security_tools" / ".toolignore"
+        nested.parent.mkdir()
+        nested.write_text("nested\n", encoding="utf-8")
+        self.assertIsNone(
+            resolve_ignore_file(
+                scanner="tool", checkout_root=self._target_root, filename=".toolignore"
+            )
+        )
+
+    def test_explicit_config_path_outside_the_checkout_is_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_ignore_file(
+                scanner="tool",
+                checkout_root=self._target_root,
+                filename=".toolignore",
+                configured_path="../tool.yml",
+            )
+
+    def test_ignore_file_symlink_must_stay_inside_checkout(self):
+        outside = self._target_root.parent / "outside.toolignore"
+        outside.write_text("fingerprint-1\n", encoding="utf-8")
+        self.addCleanup(outside.unlink)
+        (self._target_root / ".toolignore").symlink_to(outside)
+        with self.assertRaises(ValueError):
+            resolve_ignore_file(
+                scanner="tool",
+                checkout_root=self._target_root,
+                filename=".toolignore",
+            )
+
+
+class IgnoreFilePathsTest(unittest.TestCase):
+    """Tests for `ignore_file_paths`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._target_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _paths(self, configured_path: str) -> tuple[str, ...]:
+        return ignore_file_paths(
+            checkout_root=self._target_root,
+            configured_path=configured_path,
+            filename=".toolignore",
+        )
+
+    def test_no_explicit_config_means_the_root_only(self):
+        self.assertEqual(self._paths(""), (".toolignore",))
+
+    def test_nested_config_adds_its_directory_ahead_of_the_root(self):
+        self.assertEqual(
+            self._paths(".github/scan_tools_configs/tool.yml"),
+            (".github/scan_tools_configs/.toolignore", ".toolignore"),
+        )
+
+    def test_root_level_explicit_config_does_not_duplicate_the_root(self):
+        self.assertEqual(self._paths("tool.yml"), (".toolignore",))
+
+    def test_explicit_path_is_normalized(self):
+        self.assertEqual(
+            self._paths("./security_tools/../security_tools/tool.yml"),
+            ("security_tools/.toolignore", ".toolignore"),
+        )
+
+    def test_absolute_path_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._paths("/tmp/tool.yml")
 
 
 if __name__ == "__main__":
