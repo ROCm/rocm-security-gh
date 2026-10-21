@@ -19,7 +19,7 @@ so a config file can't opt out of them.
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 log = logging.getLogger(__name__)
 
@@ -148,8 +148,42 @@ def find_config_change(
     return None
 
 
+def ignore_file_paths(
+    *, checkout_root: Path, configured_path: str, filename: str
+) -> tuple[str, ...]:
+    """Return the repository-relative locations of a scanner's ignore file.
+
+    Locations are in lookup order. A scanner whose config was passed
+    explicitly (`configured_path`, e.g. `.github/scan_tools_configs/
+    trivy.yml`) keeps its ignore file beside that config, so
+    `.github/scan_tools_configs/.trivyignore` is tried first. The
+    repository root, where the tool itself would look, always follows:
+
+        configured_path="" or "trivy.yml"  -> (".trivyignore",)
+        configured_path=".github/scan_tools_configs/trivy.yml"
+            -> (".github/scan_tools_configs/.trivyignore", ".trivyignore")
+
+    Only an explicitly configured path moves the search. A config found
+    by convention sits at one of the scanner's own candidate locations,
+    and the tool's own convention for its ignore file applies there.
+    """
+    if not configured_path.strip():
+        return (filename,)
+    (config_relpath,) = scanner_config_paths(
+        checkout_root=checkout_root,
+        configured_path=configured_path,
+        candidates=(),
+    )
+    beside_config = (PurePosixPath(config_relpath).parent / filename).as_posix()
+    return tuple(dict.fromkeys((beside_config, filename)))
+
+
 def resolve_ignore_file(
-    *, scanner: str, checkout_root: Path, filename: str
+    *,
+    scanner: str,
+    checkout_root: Path,
+    filename: str,
+    configured_path: str = "",
 ) -> Path | None:
     """Return the scan target's suppression file, if it ships one.
 
@@ -157,11 +191,32 @@ def resolve_ignore_file(
     directory, which is this repo's checkout rather than the scanned one,
     so the path has to be passed explicitly or a repository's triaged
     findings come back on every run.
+
+    The first of `ignore_file_paths` that is a file wins and is the only
+    one returned. Whether a tool also reads other ignore files on its own
+    is the tool's behaviour: trivy reads only the one it is given, while
+    gitleaks additionally reads `.gitleaksignore` from its scanned
+    directory.
     """
-    ignore_path = checkout_root / filename
-    if not ignore_path.is_file():
-        return None
-    log.info(
-        "Using %s ignore file from the scanned repository: %s", scanner, ignore_path
-    )
-    return ignore_path
+    checkout_root_resolved = checkout_root.resolve()
+    for relpath in ignore_file_paths(
+        checkout_root=checkout_root,
+        configured_path=configured_path,
+        filename=filename,
+    ):
+        ignore_path = (checkout_root_resolved / relpath).resolve()
+        try:
+            ignore_path.relative_to(checkout_root_resolved)
+        except ValueError as exc:
+            raise ValueError(
+                f"{scanner} ignore path '{relpath}' resolves outside the "
+                "scanned repository"
+            ) from exc
+        if ignore_path.is_file():
+            log.info(
+                "Using %s ignore file from the scanned repository: %s",
+                scanner,
+                ignore_path,
+            )
+            return ignore_path
+    return None

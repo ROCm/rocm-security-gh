@@ -206,6 +206,68 @@ class RunGitleaksIgnoreFileTest(unittest.TestCase):
         self.assertNotIn("--gitleaks-ignore-path", self._run(None))
 
 
+class IgnoreFileLocationTest(unittest.TestCase):
+    """Where main() looks for `.gitleaksignore` relative to the config."""
+
+    CONFIG_DIR = ".github/scan_tools_configs"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        (self._root / self.CONFIG_DIR).mkdir(parents=True)
+        (self._root / self.CONFIG_DIR / "gitleaks.toml").write_text(
+            "# repository config\n", encoding="utf-8"
+        )
+
+    def _ignore_path_passed_to_gitleaks(self, *extra_args: str) -> Path | None:
+        with (
+            mock.patch("gitleaks.gha_append_step_summary"),
+            mock.patch("gitleaks.gha_set_output"),
+            mock.patch("gitleaks.get_gitleaks_binary", return_value=Path("gitleaks")),
+            mock.patch("gitleaks._run_gitleaks", return_value=False) as run_gitleaks,
+        ):
+            rc = main(
+                [
+                    "--scan-mode",
+                    "all",
+                    "--source-dir",
+                    str(self._root),
+                    "--checkout-root",
+                    str(self._root),
+                    *extra_args,
+                ]
+            )
+        self.assertEqual(rc, 0)
+        return run_gitleaks.call_args.kwargs["ignore_path"]
+
+    def test_explicit_config_directory_is_searched_for_the_ignore_file(self):
+        ignore = self._root / self.CONFIG_DIR / ".gitleaksignore"
+        ignore.write_text("fingerprint-1\n", encoding="utf-8")
+        self.assertEqual(
+            self._ignore_path_passed_to_gitleaks(
+                "--config-path", f"{self.CONFIG_DIR}/gitleaks.toml"
+            ),
+            ignore,
+        )
+
+    def test_root_ignore_file_applies_when_none_sits_beside_the_config(self):
+        ignore = self._root / ".gitleaksignore"
+        ignore.write_text("fingerprint-1\n", encoding="utf-8")
+        self.assertEqual(
+            self._ignore_path_passed_to_gitleaks(
+                "--config-path", f"{self.CONFIG_DIR}/gitleaks.toml"
+            ),
+            ignore,
+        )
+
+    def test_config_directory_is_not_searched_without_an_explicit_config(self):
+        (self._root / self.CONFIG_DIR / ".gitleaksignore").write_text(
+            "fingerprint-1\n", encoding="utf-8"
+        )
+        self.assertIsNone(self._ignore_path_passed_to_gitleaks())
+
+
 class RunGitleaksWorkingDirectoryTest(unittest.TestCase):
     """gitleaks must run from the scanned repository, not this checkout."""
 
