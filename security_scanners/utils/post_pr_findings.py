@@ -31,6 +31,15 @@ from security_scanners.utils.pr_findings import (
 
 _API_VERSION = "2022-11-28"
 _EXPECTED_SCANNERS = ("bandit", "gitleaks", "trivy", "zizmor")
+# Rollup jobs that only mirror the results of the jobs they depend on, so a
+# failure of one repeats a note already given for the job that caused it.
+# Names are matched case-insensitively against the whole job name or its
+# trailing " / "-separated segments:
+#   * "Security scanners" -- the single check branch protection requires,
+#     shown as "<caller job> / Security scanners".
+#   * "codeql / complete" -- the CodeQL rollup, shown as
+#     "<caller job> / codeql / complete".
+_ROLLUP_JOB_NAMES = ("security scanners", "codeql / complete")
 _MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 _MAX_MEMBER_BYTES = 10 * 1024 * 1024
 _MAX_TOTAL_BYTES = 20 * 1024 * 1024
@@ -492,6 +501,14 @@ def _job_scanner(name: str) -> str:
     return ""
 
 
+def _is_rollup_job(name: str) -> bool:
+    lowered = name.lower()
+    return any(
+        lowered == rollup or lowered.endswith(f" / {rollup}")
+        for rollup in _ROLLUP_JOB_NAMES
+    )
+
+
 def job_coverage_reasons(
     api: GitHubApi,
     context: PullRequestContext,
@@ -508,6 +525,8 @@ def job_coverage_reasons(
         if job is None:
             continue
         name = _string(job.get("name"), limit=200)
+        if _is_rollup_job(name):
+            continue
         conclusion = _string(job.get("conclusion"), limit=40).lower()
         scanner = _job_scanner(name)
         steps = job.get("steps")
