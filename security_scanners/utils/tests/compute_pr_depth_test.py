@@ -23,6 +23,19 @@ class ComputeFetchDepthTest(unittest.TestCase):
             "3",
         )
 
+    def test_all_mode_history_scanner_fetches_full_history(self):
+        self.assertEqual(
+            compute_fetch_depth(
+                {"pull_request": {"commits": 3}}, "all", needs_history=True
+            ),
+            "0",
+        )
+
+    def test_all_mode_tree_scanner_fetches_only_the_tip(self):
+        for payload in ({"pull_request": {"commits": 3}}, {"before": "abc"}, {}):
+            with self.subTest(payload=payload):
+                self.assertEqual(compute_fetch_depth(payload, "all"), "1")
+
     def test_empty_payload_returns_full_history(self):
         self.assertEqual(compute_fetch_depth({}), "0")
 

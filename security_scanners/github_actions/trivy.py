@@ -39,10 +39,13 @@ import fnmatch
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +57,13 @@ from security_scanners.utils.github_actions_api import (
     gha_append_step_summary,
     gha_load_github_event,
     gha_set_output,
+)
+from security_scanners.utils.fork_changes import (
+    fork_changed_paths,
+    fork_only_files,
+    restrict_to_fork_changes,
+    select_files,
+    split_git_paths,
 )
 from security_scanners.utils.step_summary import emit_reports
 from security_scanners.utils.scanner_config import (
@@ -366,33 +376,23 @@ def _determine_changed_audited_files(
     checkout_root: Path = Path("."),
     config_paths: tuple[str, ...] = _CONFIG_TRIGGERS,
 ) -> list[Path] | None:
-    """Return the changed audited files inside `scan_path`, or `None`.
+    """Return the audited files (manifests, IaC, Dockerfiles) in scope, or `None`.
 
-    Filters the git diff to `_AUDITED_PATTERNS`. The result drives the
-    'changed' mode short-circuit but, unlike bandit/zizmor, the files
-    themselves are NOT fed to trivy: its filesystem scanner needs the
-    whole subtree to resolve transitive deps and cross-file IaC
-    references, so we either scan everything under `scan_path` or
-    nothing.
+    `checkout_root` is the scan target's repo root, where `git` runs and
+    against which the repo-relative paths in `git diff --name-only` are
+    resolved; `scan_path` may be a subdirectory of it.
 
-    `checkout_root` is the scan target's git checkout (its repo root),
-    which this function runs `git` in explicitly: `scan_path` may point
-    at a subdirectory of the checkout, but `git diff --name-only`
-    always prints paths relative to the repo *root*, not to the
-    process's cwd or to whatever subdirectory `git` was invoked from.
-
-    Semantics:
-
-    * `None` — no usable diff range; caller should fall back to a full
-      recursive scan of `scan_path`.
-    * `[]` — diff range was usable but contained no audited files under
-      `scan_path`; caller should treat this as a clean no-op.
-    * `[paths…]` — at least one audited file changed; caller should run
-      trivy against `scan_path` and log the trigger files.
+    * `None` -- scan `scan_path` recursively: no usable diff range, or a
+      trivy config or ignore file changed, and the repository isn't a fork.
+    * `[]` -- the scope held no audited files under `scan_path`; a clean no-op.
+    * `[paths...]` -- audited files exist. Outside a fork they only decide
+      that trivy runs over the whole `scan_path`; on a fork they are every
+      audited file the fork changed relative to its upstream (limited to the
+      event's files in `changed` mode), and trivy scans just their context.
     """
     diff = _diff_range(event_name, event)
     if diff is None:
-        return None
+        return fork_only_files(scan_path, checkout_root, _is_audited_path)
     base_sha, head_sha = diff
 
     # Best-effort fetch so the base SHA is reachable for the diff.
@@ -409,6 +409,7 @@ def _determine_changed_audited_files(
                 "git",
                 "diff",
                 "--name-only",
+                "-z",
                 # D is here for the config check below: deleting a config
                 # or ignore file switches the whole repository back to the
                 # default one, which is as much a config change as editing
@@ -422,6 +423,7 @@ def _determine_changed_audited_files(
             check=True,
             capture_output=True,
             text=True,
+            errors="surrogateescape",
         )
     except subprocess.CalledProcessError as exc:
         log.warning(
@@ -431,9 +433,11 @@ def _determine_changed_audited_files(
             exc.returncode,
             exc.stderr.strip() if exc.stderr else "",
         )
-        return None
+        return fork_only_files(scan_path, checkout_root, _is_audited_path)
 
-    changed = result.stdout.splitlines()
+    changed = split_git_paths(result.stdout)
+    # On a fork, files that only came in from upstream aren't ours to scan.
+    changed = restrict_to_fork_changes(changed)
     config_change = find_config_change(changed, filenames=config_paths)
     if config_change is not None:
         log.info(
@@ -441,26 +445,9 @@ def _determine_changed_audited_files(
             "every file in scope instead of the changed files alone",
             config_change,
         )
-        return None
+        return fork_only_files(scan_path, checkout_root, _is_audited_path)
 
-    scan_root = scan_path.resolve()
-    files: list[Path] = []
-    for raw in changed:
-        relpath = raw.strip()
-        if not relpath or not _is_audited_path(relpath):
-            continue
-        # `relpath` is relative to the repo root (`checkout_root`), not
-        # to this process's cwd, so it must be re-anchored there before
-        # any further path operations.
-        candidate = checkout_root / relpath
-        try:
-            candidate.resolve().relative_to(scan_root)
-        except ValueError:
-            continue
-        if not candidate.is_file():
-            continue
-        files.append(candidate)
-    return files
+    return select_files(changed, scan_path, checkout_root, _is_audited_path)
 
 
 def _run_trivy(
@@ -471,6 +458,7 @@ def _run_trivy(
     scanners: list[str],
     scan_path: Path,
     ignore_path: Path | None = None,
+    scan_files: list[Path] | None = None,
 ) -> dict[str, int]:
     """Run trivy for each user-requested format plus an internal JSON
     tally pass if the user didn't already request one, and return a
@@ -507,44 +495,230 @@ def _run_trivy(
         runs = [*user_targets, tally_target]
 
     subprocess_env = _trivy_subprocess_env()
-    try:
-        # NOTE: trivy emits a single report per invocation, so a
-        # multi-format request re-runs the full scan once per format.
-        for tgt in runs:
-            cmd = [
-                *base_args,
-                "--format",
-                tgt.fmt,
-                "--output",
-                str(tgt.path),
-                str(scan_path),
-            ]
-            log.info("Running: %s", " ".join(cmd))
-            try:
-                completed = subprocess.run(
-                    cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    env=subprocess_env,
-                )
-            except OSError as exc:
-                raise RuntimeError(
-                    f"trivy invocation for format '{tgt.fmt}' failed to start: {exc}"
-                ) from exc
-            if completed.returncode != 0:
-                raise RuntimeError(
-                    f"trivy exited unexpectedly with code {completed.returncode} "
-                    f"for format '{tgt.fmt}'; stderr: "
-                    f"{completed.stderr.strip() if completed.stderr else '<empty>'}"
-                )
 
-        return _tally_findings_by_severity(tally_target.path)
+    def execute(cmd: list[str], label: str) -> None:
+        log.info("Running: %s", " ".join(cmd))
+        try:
+            completed = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=subprocess_env,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"trivy invocation for format '{label}' failed to start: {exc}"
+            ) from exc
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"trivy exited unexpectedly with code {completed.returncode} "
+                f"for format '{label}'; stderr: "
+                f"{completed.stderr.strip() if completed.stderr else '<empty>'}"
+            )
+
+    try:
+        with _trivy_scan_root(scan_path, scan_files) as target:
+            if scan_files is None:
+                # Trivy emits one report per invocation, so each format reruns it.
+                for tgt in runs:
+                    execute(
+                        [
+                            *base_args,
+                            "--format",
+                            tgt.fmt,
+                            "--output",
+                            str(tgt.path),
+                            str(target),
+                        ],
+                        tgt.fmt,
+                    )
+                return _tally_findings_by_severity(tally_target.path)
+
+            selected = {
+                path.as_posix() for path in _relative_to_root(scan_path, scan_files)
+            }
+            with tempfile.TemporaryDirectory(prefix="trivy-scoped-") as work:
+                raw, filtered = Path(work, "raw.json"), Path(work, "filtered.json")
+                list_pkgs = ["--list-all-pkgs"] if _needs_packages(runs) else []
+                execute(
+                    [
+                        *base_args,
+                        *list_pkgs,
+                        "--format",
+                        "json",
+                        "--output",
+                        str(raw),
+                        str(target),
+                    ],
+                    "json",
+                )
+                _filter_report_to_files(raw, filtered, selected)
+                for tgt in runs:
+                    if tgt.fmt == "json":
+                        shutil.copyfile(filtered, tgt.path)
+                        continue
+                    execute(
+                        [
+                            str(binary),
+                            "convert",
+                            "--quiet",
+                            "--severity",
+                            severity_csv,
+                            "--scanners",
+                            scanners_csv,
+                            "--format",
+                            tgt.fmt,
+                            "--output",
+                            str(tgt.path),
+                            str(filtered),
+                        ],
+                        tgt.fmt,
+                    )
+                return _tally_findings_by_severity(filtered)
     finally:
         # Safe even if the loop above raised before writing the tally
         # file (unlink(missing_ok=True) is a no-op then).
         if tally_target.path == Path(_INTERNAL_TALLY_PATH):
             tally_target.path.unlink(missing_ok=True)
+
+
+# Formats built from a report's package list rather than its findings.
+_SBOM_FORMATS = frozenset({"cyclonedx", "spdx-json", "github"})
+
+
+def _needs_packages(runs: list[_ReportTarget]) -> bool:
+    return any(target.fmt in _SBOM_FORMATS for target in runs)
+
+
+def _relative_to_root(scan_path: Path, files: list[Path]) -> list[Path]:
+    """Return `files` as paths relative to `scan_path`, dropping any outside it."""
+    scan_root = Path(os.path.abspath(scan_path))
+    relative: list[Path] = []
+    for source in files:
+        try:
+            relative.append(Path(os.path.abspath(source)).relative_to(scan_root))
+        except ValueError:
+            continue
+    return relative
+
+
+def _filter_report_to_files(raw: Path, filtered: Path, selected: set[str]) -> None:
+    """Write `raw` to `filtered`, keeping only results for `selected` targets.
+
+    Targets are posix paths relative to the scanned root, e.g. "infra/main.tf".
+    """
+    try:
+        data = json.loads(raw.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Failed to read trivy JSON report at {raw}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"trivy JSON report at {raw} is not an object")
+    results = data.get("Results") or []
+    data["Results"] = [
+        result
+        for result in results
+        if isinstance(result, dict) and result.get("Target") in selected
+    ]
+    filtered.write_text(json.dumps(data), encoding="utf-8")
+
+
+# A local Terraform module reference, e.g. `source = "../modules/vpc"`.
+_TF_MODULE_SOURCE = re.compile(r'^\s*source\s*=\s*"(\.{1,2}/[^"]*)"', re.MULTILINE)
+
+
+@contextmanager
+def _trivy_scan_root(scan_path: Path, scan_files: list[Path] | None) -> Iterator[Path]:
+    """Stage a bounded copy of the context Trivy needs for `scan_files`.
+
+    Each file's own directory and the regular files of its ancestors are
+    copied, plus the directories its Terraform files reference as local
+    modules. Nothing else is copied, so a file at the repo root can't pull
+    in the whole tree. Every selected file is staged itself, even when it
+    sits below a symlinked directory, and a file that can't be staged is an
+    error rather than a silent omission.
+    """
+    if scan_files is None:
+        yield scan_path
+        return
+
+    real_root = Path(os.path.abspath(scan_path)).resolve()
+    selected = _relative_to_root(scan_path, scan_files)
+
+    # Directories are tracked relative to the root so a symlink in the scan
+    # path itself doesn't change what they mean.
+    directories: set[Path] = set()
+    pending = [path.parent for path in selected]
+    while pending:
+        relative = pending.pop()
+        directory = real_root / relative
+        try:
+            resolved = directory.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        # A symlinked directory has no safe staged location of its own.
+        if resolved != directory or relative in directories:
+            continue
+        directories.add(relative)
+        pending.extend(_local_terraform_modules(directory, real_root))
+
+    with tempfile.TemporaryDirectory(prefix="trivy-fork-scope-") as temp:
+        staged_root = Path(temp)
+        copy_from = set(directories)
+        for relative in directories:
+            copy_from.update(relative.parents)
+        for relative in copy_from:
+            _copy_directory_files(
+                real_root / relative, staged_root / relative, real_root
+            )
+        for relative in selected:
+            destination = staged_root / relative
+            if not destination.is_file():
+                _copy_file(real_root / relative, destination, real_root)
+            if not destination.is_file():
+                raise RuntimeError(f"Could not stage {relative} for trivy")
+        yield staged_root
+
+
+def _local_terraform_modules(directory: Path, real_root: Path) -> list[Path]:
+    """Return the in-tree directories (relative to `real_root`) that
+    `directory`'s .tf files reference as local modules."""
+    modules: list[Path] = []
+    for tf_file in directory.glob("*.tf"):
+        try:
+            resolved = tf_file.resolve(strict=True)
+            resolved.relative_to(real_root)
+            text = resolved.read_text(encoding="utf-8")
+        except (OSError, RuntimeError, UnicodeDecodeError, ValueError):
+            continue
+        for match in _TF_MODULE_SOURCE.findall(text):
+            module = Path(os.path.normpath(directory / match))
+            if module.is_relative_to(real_root) and module.is_dir():
+                modules.append(module.relative_to(real_root))
+    return modules
+
+
+def _copy_file(source: Path, destination: Path, real_root: Path) -> None:
+    """Copy `source` when it is a regular file whose target stays in the checkout."""
+    try:
+        resolved = source.resolve(strict=True)
+        resolved.relative_to(real_root)
+    except (OSError, RuntimeError, ValueError):
+        return
+    if resolved.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resolved, destination)
+
+
+def _copy_directory_files(directory: Path, destination: Path, real_root: Path) -> None:
+    """Copy the files directly in `directory` that stay in the checkout."""
+    try:
+        children = list(directory.iterdir())
+    except OSError:
+        return
+    for source in children:
+        if source.name != ".git":
+            _copy_file(source, destination / source.name, real_root)
 
 
 def _tally_findings_by_severity(json_path: Path) -> dict[str, int]:
@@ -584,11 +758,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "'changed' (default) short-circuits with a no-op when no "
             "dependency-manifest / IaC / container file changed in the "
-            "calling event, and otherwise scans the entire --source-dir "
-            "(trivy's filesystem scanner needs the whole subtree to "
-            "resolve transitive deps and cross-file IaC references, so "
-            "we don't try to feed individual changed files). 'all' "
-            "always scans --source-dir recursively."
+            "calling event. Forks scan only their own matching files; "
+            "non-forks scan the entire --source-dir. 'all' scans every "
+            "matching fork-owned file on a fork, otherwise --source-dir."
         ),
     )
     p.add_argument(
@@ -713,7 +885,9 @@ def main(argv: list[str]) -> int:
         # fail on events that have no payload we can parse, even though
         # it never looks at one.
         if args.scan_mode == "all":
-            files: list[Path] | None = None
+            files: list[Path] | None = fork_only_files(
+                source_dir, checkout_root, _is_audited_path
+            )
         else:
             files = _determine_changed_audited_files(
                 event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
@@ -726,18 +900,26 @@ def main(argv: list[str]) -> int:
         log.error("%s", exc)
         return 2
 
+    fork_scoped = fork_changed_paths() is not None
     if files is None:
         log.info(
             "Trivy scope: recursive scan of %s (no usable diff range)",
             source_dir,
         )
     elif files:
-        log.info(
-            "Trivy scope: recursive scan of %s "
-            "(%d audited file(s) changed in the event)",
-            source_dir,
-            len(files),
-        )
+        if fork_scoped:
+            log.info(
+                "Trivy scope: %d fork-owned audited file(s) under %s",
+                len(files),
+                source_dir,
+            )
+        else:
+            log.info(
+                "Trivy scope: recursive scan of %s "
+                "(%d audited file(s) changed in the event)",
+                source_dir,
+                len(files),
+            )
         for f in files:
             log.info("  - %s", f)
     else:
@@ -760,7 +942,6 @@ def main(argv: list[str]) -> int:
     sarif_target = next((t for t in targets if t.fmt == "sarif"), None)
     non_sarif = [t for t in targets if t.fmt != "sarif"]
 
-    # 'changed' mode with nothing to scan: emit empty paths so uploads skip.
     if files is not None and not files:
         gha_set_output({"sarif_path": "", "non_sarif_paths": ""})
         return 0
@@ -774,6 +955,7 @@ def main(argv: list[str]) -> int:
             scanners=scanners,
             scan_path=source_dir,
             ignore_path=ignore_path,
+            scan_files=files if fork_scoped else None,
         )
         # Set outputs only after a successful run, gated on the report
         # actually existing on disk: the workflow's upload steps run with

@@ -39,12 +39,15 @@ class ScannerSpec:
         runner: `runs-on` label for this scanner's matrix leg. Pinned per
             scanner (rather than workflow-wide) because the scanners
             download platform-specific binaries.
+        needs_history: Whether an `all`-mode scan reads git history, and
+            so needs a full-depth checkout rather than a shallow one.
     """
 
     name: str
     module: str
     timeout_minutes: int
     runner: str = "ubuntu-24.04"
+    needs_history: bool = False
 
     def budget(self, requested_minutes: int) -> int:
         """Return this scanner's timeout, honouring a caller's request.
@@ -61,6 +64,7 @@ SCANNERS: tuple[ScannerSpec, ...] = (
         name="gitleaks",
         module="security_scanners.github_actions.gitleaks",
         timeout_minutes=30,
+        needs_history=True,
     ),
     ScannerSpec(
         name="zizmor",
@@ -89,6 +93,7 @@ def build_matrix(specs: tuple[ScannerSpec, ...], timeout_minutes: int = 0) -> st
                 "module": spec.module,
                 "timeout_minutes": spec.budget(timeout_minutes),
                 "runner": spec.runner,
+                "needs_history": spec.needs_history,
             }
             for spec in specs
         ]
