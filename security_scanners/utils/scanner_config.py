@@ -175,9 +175,7 @@ def ignore_file_paths(
         candidates=(),
     )
     config_dir = PurePosixPath(config_relpath).parent
-    beside_config = tuple(
-        (config_dir / filename).as_posix() for filename in filenames
-    )
+    beside_config = tuple((config_dir / filename).as_posix() for filename in filenames)
     return tuple(dict.fromkeys((*beside_config, *filenames)))
 
 

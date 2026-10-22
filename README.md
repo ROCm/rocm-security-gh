@@ -89,7 +89,7 @@ which one won:
 | gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `.github/scan_tools_configs/gitleaks.toml` |
 | zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
 | bandit   | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
-| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore.yaml` / `.trivyignore`      | `.github/scan_tools_configs/trivy.yml`     |
+| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore.yaml` / `.trivyignore`     | `.github/scan_tools_configs/trivy.yml`     |
 | CodeQL   | The explicit `codeql_config_path`                                        | Action defaults                            |
 
 Each scanner's candidates are listed in the order that scanner itself
@@ -125,12 +125,12 @@ Each scanner has its own way to record a finding as triaged. Two of them
 use a dedicated ignore file; the others suppress through a comment next to
 the code or an entry in the scanner's config:
 
-| Scanner  | Ignore file                     | Inline suppression                             | In the scanner's config                       |
-| -------- | ------------------------------- | ---------------------------------------------- | --------------------------------------------- |
-| gitleaks | `.gitleaksignore`, fingerprints | `gitleaks:allow` comment on the line           | `[[allowlists]]`                              |
-| trivy    | `.trivyignore.yaml` / `.trivyignore`, finding IDs | --                                   | `scan.skip-dirs`, `scan.skip-files`           |
-| bandit   | none                            | `# nosec <test ID>` comment on the line        | `skips`, `tests`, `exclude_dirs`              |
-| zizmor   | none                            | `# zizmor: ignore[<rule>]` comment on the line | `rules.<rule>.ignore`, `rules.<rule>.disable` |
+| Scanner  | Ignore file                                       | Inline suppression                             | In the scanner's config                       |
+| -------- | ------------------------------------------------- | ---------------------------------------------- | --------------------------------------------- |
+| gitleaks | `.gitleaksignore`, fingerprints                   | `gitleaks:allow` comment on the line           | `[[allowlists]]`                              |
+| trivy    | `.trivyignore.yaml` / `.trivyignore`, finding IDs | --                                             | `scan.skip-dirs`, `scan.skip-files`           |
+| bandit   | none                                              | `# nosec <test ID>` comment on the line        | `skips`, `tests`, `exclude_dirs`              |
+| zizmor   | none                                              | `# zizmor: ignore[<rule>]` comment on the line | `rules.<rule>.ignore`, `rules.<rule>.disable` |
 
 The syntax for each is documented in the comments of the scanner's default
 config under `.github/scan_tools_configs/`, which is also the starting

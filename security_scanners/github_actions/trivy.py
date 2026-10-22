@@ -644,7 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
             "When omitted, conventional root-level names are discovered "
             "before falling back to the baseline default. "
             f"One of {', '.join(_IGNORE_FILENAMES)} is read from the same "
-          "directory as an explicit config, else from --checkout-root."
+            "directory as an explicit config, else from --checkout-root."
         ),
     )
     p.add_argument(
