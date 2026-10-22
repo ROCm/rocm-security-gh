@@ -149,15 +149,15 @@ def find_config_change(
 
 
 def ignore_file_paths(
-    *, checkout_root: Path, configured_path: str, filename: str
+    *, checkout_root: Path, configured_path: str, filenames: Sequence[str]
 ) -> tuple[str, ...]:
     """Return the repository-relative locations of a scanner's ignore file.
 
     Locations are in lookup order. A scanner whose config was passed
     explicitly (`configured_path`, e.g. `.github/scan_tools_configs/
-    trivy.yml`) keeps its ignore file beside that config, so
-    `.github/scan_tools_configs/.trivyignore` is tried first. The
-    repository root, where the tool itself would look, always follows:
+    trivy.yml`) keeps its ignore files beside that config, so the names in
+    `filenames` are tried there first. The repository root, where the tool
+    itself would look, always follows:
 
         configured_path="" or "trivy.yml"  -> (".trivyignore",)
         configured_path=".github/scan_tools_configs/trivy.yml"
@@ -168,21 +168,24 @@ def ignore_file_paths(
     and the tool's own convention for its ignore file applies there.
     """
     if not configured_path.strip():
-        return (filename,)
+        return tuple(filenames)
     (config_relpath,) = scanner_config_paths(
         checkout_root=checkout_root,
         configured_path=configured_path,
         candidates=(),
     )
-    beside_config = (PurePosixPath(config_relpath).parent / filename).as_posix()
-    return tuple(dict.fromkeys((beside_config, filename)))
+    config_dir = PurePosixPath(config_relpath).parent
+    beside_config = tuple(
+        (config_dir / filename).as_posix() for filename in filenames
+    )
+    return tuple(dict.fromkeys((*beside_config, *filenames)))
 
 
 def resolve_ignore_file(
     *,
     scanner: str,
     checkout_root: Path,
-    filename: str,
+    filenames: Sequence[str],
     configured_path: str = "",
 ) -> Path | None:
     """Return the scan target's suppression file, if it ships one.
@@ -202,7 +205,7 @@ def resolve_ignore_file(
     for relpath in ignore_file_paths(
         checkout_root=checkout_root,
         configured_path=configured_path,
-        filename=filename,
+        filenames=filenames,
     ):
         ignore_path = (checkout_root_resolved / relpath).resolve()
         try:
