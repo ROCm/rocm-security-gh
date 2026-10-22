@@ -436,7 +436,6 @@ def _run_gitleaks(
         "--source",
         str(source_dir.resolve()),
         "--redact",
-        "--verbose",
         "--no-banner",
         "--exit-code",
         str(_LEAK_EXIT_CODE),
