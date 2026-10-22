@@ -90,10 +90,10 @@ _CONFIG_PATH = ".github/scan_tools_configs/trivy.yml"
 # Where a scanned repository is allowed to keep its own config, in the
 # order trivy itself would look for one.
 _CONFIG_CANDIDATES: tuple[str, ...] = ("trivy.yaml", "trivy.yml")
-# Suppressions for findings a repository has already triaged. Read from
-# the directory of an explicitly configured config, then from the
-# repository root (see `ignore_file_paths`).
-_IGNORE_FILENAME = ".trivyignore"
+# Suppressions for findings a repository has already triaged. The YAML
+# format supports path-scoped entries and statements; the plain format is
+# retained as a fallback for repositories that have not adopted it.
+_IGNORE_FILENAMES: tuple[str, ...] = (".trivyignore.yaml", ".trivyignore")
 # Ascending severity order; threshold comparisons rely on it. Trivy has a
 # CRITICAL tier (unlike bandit/zizmor); UNKNOWN never satisfies a threshold.
 _SEVERITY_ORDER: tuple[str, ...] = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
@@ -162,7 +162,7 @@ _AUDITED_PATTERNS: tuple[str, ...] = (
 # Config-only PRs widen the run to a full scan instead (see
 # _determine_changed_audited_files), so a new config or suppression is
 # exercised by the PR that introduces it.
-_CONFIG_TRIGGERS: tuple[str, ...] = (*_CONFIG_CANDIDATES, _IGNORE_FILENAME)
+_CONFIG_TRIGGERS: tuple[str, ...] = (*_CONFIG_CANDIDATES, *_IGNORE_FILENAMES)
 
 
 @dataclass(frozen=True)
@@ -643,8 +643,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional trivy config path relative to --checkout-root. "
             "When omitted, conventional root-level names are discovered "
             "before falling back to the baseline default. "
-            f"{_IGNORE_FILENAME} is read from the same directory as an "
-            "explicit config, else from --checkout-root."
+            f"One of {', '.join(_IGNORE_FILENAMES)} is read from the same "
+            "directory as an explicit config, else from --checkout-root."
         ),
     )
     p.add_argument(
@@ -698,14 +698,14 @@ def main(argv: list[str]) -> int:
             *ignore_file_paths(
                 checkout_root=checkout_root,
                 configured_path=args.config_path,
-                filename=_IGNORE_FILENAME,
+                filenames=_IGNORE_FILENAMES,
             ),
         )
         config_path = _resolve_config_path(checkout_root, args.config_path)
         ignore_path = resolve_ignore_file(
             scanner="trivy",
             checkout_root=checkout_root,
-            filename=_IGNORE_FILENAME,
+            filenames=_IGNORE_FILENAMES,
             configured_path=args.config_path,
         )
         # Only 'changed' mode needs the event payload, to work out the

@@ -12,13 +12,21 @@
 #
 # Ways to suppress a finding, narrowest first:
 #
-#   1. `.trivyignore` -- one vulnerability, misconfiguration or secret rule
+#   1. `.trivyignore.yaml` -- path-scoped suppressions with an explanation:
+#          misconfigurations:
+#            - id: AVD-KSV-0017
+#              paths: ["k8s-ds-amdgpu-dp.yaml"]
+#              statement: The device plugin requires privileged access.
+#      Trivy's YAML ignore format is experimental upstream.
+#
+#   2. `.trivyignore` -- one vulnerability, misconfiguration or secret rule
 #      ID per line. Add `exp:YYYY-MM-DD` for a temporary suppression:
 #          CVE-2019-14697 exp:2027-01-01
-#      Keep it beside an explicitly configured `trivy.yml`, or at the
-#      repository root. The file beside the config takes precedence.
+#      The plain format is used when no `.trivyignore.yaml` is present.
+#      Keep either file beside an explicitly configured `trivy.yml`, or at
+#      the repository root. The file beside the config takes precedence.
 #
-#   2. `scan.skip-dirs` / `scan.skip-files` below -- paths trivy never
+#   3. `scan.skip-dirs` / `scan.skip-files` below -- paths trivy never
 #      reads, for vendored trees and generated output. Anything found only
 #      there is not scanned at all, so keep entries narrow.
 
