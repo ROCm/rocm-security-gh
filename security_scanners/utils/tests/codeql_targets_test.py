@@ -96,7 +96,8 @@ class ParseTargetsTest(unittest.TestCase):
         self.assertEqual(target.container, "")
 
     def test_every_option_is_read(self):
-        (target,) = parse_targets(f"""
+        (target,) = parse_targets(
+            f"""
             [[target]]
             name = "t.1_x"
             language = "c-cpp"
@@ -110,7 +111,8 @@ class ParseTargetsTest(unittest.TestCase):
             sparse_checkout = ["third_party/", "cmake"]
             timeout_minutes = 240
             fail_on_findings = true
-            """)
+            """
+        )
         self.assertEqual(target.scope, ("a", "b"))
         self.assertEqual(target.container, IMAGE)
         self.assertEqual(target.trigger_paths, (".github/scripts/build.sh", "cmake"))
