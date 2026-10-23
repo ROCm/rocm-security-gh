@@ -92,7 +92,25 @@ jobs:
         with:
           persist-credentials: false
 
+      # Without a repository config, the baseline's own config applies.
+      # zizmor's `unpinned-uses` audit reports unpinned action and reusable
+      # workflow references, which we don't want to duplicate.
       - name: Initialize CodeQL
+        if: needs.plan.outputs.config_path == ''
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config: |
+            query-filters:
+              - exclude:
+                  id: actions/unpinned-tag
+
+      # The Action ignores `config-file` when `config` is also set, so a
+      # repository that passes its own config owns its query filters.
+      - name: Initialize CodeQL with repository config
+        if: needs.plan.outputs.config_path != ''
         uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           languages: ${{ matrix.language }}
