@@ -53,10 +53,10 @@ scanner, which means:
 Inputs, all optional, describe the calling event, who reads the output,
 where repository-specific scanner configs live and how long the
 repository is willing to wait: `scan_mode`, `run_on_label_change`,
-`report_formats`, `scan_path`, `codeql_config_path`, the four
-script-backed scanners' `<scanner>_config_path` inputs and
-`timeout_minutes`. The input descriptions in the workflow file are the
-authoritative reference.
+`report_formats`, `scan_path`, `codeql_config_path`,
+`codeql_targets_path`, the `codeql_build_*` inputs, the four script-backed scanners'
+`<scanner>_config_path` inputs and `timeout_minutes`. The input
+descriptions in the workflow file are the authoritative reference.
 
 `timeout_minutes` is the one input that moves a scanner's own budget,
 and it only ever moves it up. Each scanner gets 20 to 30 minutes here
@@ -84,13 +84,14 @@ falls back to the copy in this repository when it ships none. The scan
 log names the file that was used, so it is always visible in the check
 which one won:
 
-| Scanner  | Read from the scanned repository, first match wins                       | Default here                               |
-| -------- | ------------------------------------------------------------------------ | ------------------------------------------ |
-| gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `.github/scan_tools_configs/gitleaks.toml` |
-| zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
-| bandit   | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
-| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `.github/scan_tools_configs/trivy.yml`     |
-| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults                            |
+| Scanner        | Read from the scanned repository, first match wins                       | Default here                               |
+| -------------- | ------------------------------------------------------------------------ | ------------------------------------------ |
+| gitleaks       | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `.github/scan_tools_configs/gitleaks.toml` |
+| zizmor         | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
+| bandit         | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
+| trivy          | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `.github/scan_tools_configs/trivy.yml`     |
+| CodeQL         | The explicit `codeql_config_path`                                        | Action defaults                            |
+| CodeQL targets | The explicit `codeql_targets_path`                                       | No targets                                 |
 
 Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
@@ -312,6 +313,104 @@ two sources because neither is enough alone:
 | ------------------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | `GET /repos/{owner}/{repo}/languages`                   | Linguist's view of the default branch, the same signal GitHub's own default setup uses | Refreshes only after a default-branch push, so a PR that adds a language is invisible to it |
 | `GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1` | Every file in the exact commit under scan                                              | GitHub truncates it past 100,000 entries or 7 MB                                            |
+
+#### Scoped targets
+
+Discovery scans with `build-mode: none` and skips C/C++ past the file limit
+above. A repository can instead analyse C/C++ with a build of its own,
+over part of the repository. A build analysis is a **target**, and a
+repository declares one of two ways.
+
+**One build, as inputs.** `codeql_build_mode: manual` plus a command is
+enough for a repository with a single build:
+
+```yaml
+jobs:
+  security:
+    uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@v1
+    with:
+      codeql_build_mode: manual
+      codeql_build_command: cmake -S tools/native -B build && cmake --build build
+      codeql_scope: tools/native/
+      codeql_build_container: example/builder:1.0@sha256:<64 hex digits>
+      codeql_fail_on_findings: true
+```
+
+| Input                     | Target key         | Default                     |
+| ------------------------- | ------------------ | --------------------------- |
+| `codeql_build_mode`       |                    | `none`: no build, discovery |
+| `codeql_build_command`    | `build_command`    | Required with `manual`      |
+| `codeql_build_container`  | `container`        | The runner                  |
+| `codeql_scope`            | `scope`            | The whole repository        |
+| `codeql_sparse_checkout`  | `sparse_checkout`  | Full checkout               |
+| `codeql_trigger_paths`    | `trigger_paths`    | None                        |
+| `codeql_fail_on_findings` | `fail_on_findings` | `false`                     |
+
+The list inputs take one path per line. The target is named `c-cpp`, and
+it **replaces** discovery's own C/C++ analysis: with `manual`, C/C++ is
+analysed only by the build, and the job summary says so. The other
+discovered languages run as usual. Build inputs set without
+`codeql_build_mode: manual` fail the plan rather than being ignored.
+
+**Several builds, as a file.** A TOML file passed as `codeql_targets_path`
+declares up to 32 targets. It can be combined with the inputs above, but
+may not name a target `c-cpp`.
+
+```toml
+[[target]]
+name = "native-tool"
+language = "c-cpp"
+scope = ["tools/native/"]
+container = "example/builder:1.0@sha256:<64 hex digits>"
+build_command = "cmake -S tools/native -B build && cmake --build build"
+trigger_paths = ["scripts/build_native.sh"]
+sparse_checkout = ["third_party/headers"]
+timeout_minutes = 180
+fail_on_findings = true
+```
+
+| Key                | Meaning                                                                                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`             | Required. Letters, digits, `.`, `_`, `-`; at most 48. Names the `codeql / target <name>` check and the category `/target:<name>`.                                                     |
+| `language`         | Required. Only `c-cpp`.                                                                                                                                                               |
+| `scope`            | Required. Repository-relative directories; `.` is the whole repository. Matched literally by path segment; no globs.                                                                  |
+| `build_command`    | Required. Run with `bash` from the repository root while CodeQL watches. Everything it compiles is analysed.                                                                          |
+| `container`        | Optional build image, pinned by digest. Without one the build runs on the runner.                                                                                                     |
+| `trigger_paths`    | Optional files or directories, besides `scope`, whose change runs the target on a pull request.                                                                                       |
+| `sparse_checkout`  | Optional directories to check out besides `scope`. When set, the checkout is sparse: only these, `scope`, the CodeQL config's directory and the root files. Omit for a full checkout. |
+| `timeout_minutes`  | Optional. Raises the default 120, never lowers it; at most 360.                                                                                                                       |
+| `fail_on_findings` | Optional, default `false`. Fail the check when results remain in scope.                                                                                                               |
+
+- **Only the scope is reported.** The build pulls in code from elsewhere
+  in the repository, and CodeQL reports on it too. Results outside `scope`
+  are dropped before upload; one with no location is kept. The job summary
+  counts what was dropped.
+- **The file limit is counted over the scope.** The 1,000 C/C++ file limit
+  applies to the files under `scope`, so a repository past the limit can
+  still scan the part a target names. If GitHub truncates the repository
+  tree, each scope directory's own tree is read. A scope that can't be
+  counted is skipped, never assumed small. A `scope` directory with no
+  files at the scanned commit, such as a misspelled one, fails the run
+  instead of analysing nothing.
+- **Pull requests run the targets they touch:** those with a changed file
+  in `scope` or `trigger_paths`. A change to `codeql_config_path`, or
+  `scan_mode: all`, runs every target, and a change to the targets file
+  runs every target in it.
+- **Results go to code scanning** under the target's category on pushes and
+  scheduled runs. Pull requests never upload: on same-repository ones the
+  results go to the findings comment instead.
+- **Targets from the file leave discovery unchanged.** To avoid scanning
+  such a target's directory twice, add it to `paths-ignore` in
+  `codeql_config_path`. The `c-cpp` target from the inputs needs no such
+  entry.
+- **The build is the repository's own code.** It runs with the workflow
+  token and no other secret, so review changes to the targets file.
+- **Build containers must be glibc-based** (the workflow sets up Python in
+  them) and must provide POSIX sh and CA certificates. Missing Bash and Git
+  are installed with `apt-get`, `dnf`, `microdnf`, `yum`, `zypper` or
+  `pacman`, as root or through passwordless `sudo`. Alpine images are not
+  supported.
+- Private repositories skip targets along with the rest of CodeQL.
 
 ## Consuming these workflows from another repo
 

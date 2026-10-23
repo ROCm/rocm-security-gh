@@ -30,6 +30,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
+from security_scanners.utils.codeql_targets import (
+    CodeqlTarget,
+    TargetsError,
+    load_targets,
+    minimal_scopes,
+    path_in_scope,
+    target_from_build_inputs,
+)
 from security_scanners.utils.compute_scan_matrix import MAX_TIMEOUT_MINUTES
 from security_scanners.utils.github_actions_api import (
     gha_append_step_summary,
@@ -278,9 +286,15 @@ def languages_from_linguist(names: Iterable[str]) -> tuple[set[str], list[str]]:
 
 
 def build_plan(
-    discovery: Discovery, *, restrict_to: ChangedFiles | None = None
+    discovery: Discovery,
+    *,
+    restrict_to: ChangedFiles | None = None,
+    manually_built: frozenset[str] = frozenset(),
 ) -> CodeqlPlan:
     """Decide the language matrix from what discovery managed to establish.
+
+    A language in `manually_built` is analysed by its own build, so it is
+    left out of the matrix.
 
     Raises:
         DiscoveryError: neither source produced a usable answer, so the
@@ -319,6 +333,9 @@ def build_plan(
         # Linguist claims but the tree doesn't show would fail the run.
         selected -= _NEEDS_FILE_EVIDENCE - path_selected
     selected.add(ACTIONS_LANGUAGE)
+    built = selected & manually_built
+    selected -= built
+    skipped.extend(f"{language} (analysed by its manual build)" for language in built)
 
     warnings = list(discovery.warnings)
     restricted = False
@@ -369,6 +386,163 @@ def build_plan(
     )
 
 
+@dataclass(frozen=True)
+class TargetPlan:
+    """The scoped targets to analyse, and the ones left out, with reasons."""
+
+    selected: tuple[CodeqlTarget, ...] = ()
+    skipped: tuple[str, ...] = ()
+
+    def matrix(self, timeout_minutes: int, checkout_also: Sequence[str] = ()) -> str:
+        """Render `strategy.matrix` for the targets job.
+
+        A target's `timeout_minutes` can raise `timeout_minutes`, not lower it.
+        `sparse_checkout` is the newline-separated directories to check out,
+        or empty for a full checkout; a sparse one also includes
+        `checkout_also`, for files every target needs.
+        """
+        return json.dumps(
+            {
+                "include": [
+                    {
+                        "name": target.name,
+                        "language": target.language,
+                        "scope": list(target.scope),
+                        "build_command": target.build_command,
+                        "container": target.container,
+                        "sparse_checkout": (
+                            "\n".join(
+                                minimal_scopes(
+                                    (
+                                        *target.scope,
+                                        *target.sparse_checkout,
+                                        *checkout_also,
+                                    )
+                                )
+                            )
+                            if target.sparse_checkout
+                            else ""
+                        ),
+                        "timeout_minutes": max(timeout_minutes, target.timeout_minutes),
+                        "fail_on_findings": target.fail_on_findings,
+                    }
+                    for target in self.selected
+                ]
+            }
+        )
+
+
+def count_scope_cpp_files(
+    fetcher: JsonFetcher,
+    *,
+    repo: str,
+    sha: str,
+    discovery: Discovery,
+    scope: Iterable[str],
+) -> int | None:
+    """Count the C/C++ files under the `scope` directories at `sha`.
+
+    Uses the exact tree when discovery has it, otherwise each directory's own
+    tree. Returns None when the count can't be established: a truncated
+    tree, a failed lookup, or a scope of "." without an exact tree.
+
+    Raises:
+        TargetsError: a scope directory holds no files at `sha`. Git doesn't
+            track empty directories, so that is a directory that doesn't
+            exist, such as a misspelled scope.
+    """
+    directories = minimal_scopes(scope)
+    if discovery.has_exact_tree:
+        total = 0
+        for directory in directories:
+            under = [path for path in discovery.paths if path_in_scope(path, directory)]
+            if not under and directory != ".":
+                raise TargetsError(_missing_scope_message(directory, sha))
+            total += count_cpp_files(under)
+        return total
+
+    total = 0
+    for directory in directories:
+        if directory == ".":
+            return None
+        try:
+            paths, truncated = _fetch_tree_paths(fetcher, repo, sha, directory)
+        except HTTPError as exc:
+            if exc.code == 404:
+                raise TargetsError(_missing_scope_message(directory, sha)) from exc
+            return None
+        except (DiscoveryError, OSError):
+            return None
+        if truncated:
+            return None
+        if not paths:
+            raise TargetsError(_missing_scope_message(directory, sha))
+        total += count_cpp_files(paths)
+    return total
+
+
+def _missing_scope_message(directory: str, sha: str) -> str:
+    return f"scope directory {directory!r} has no files at {sha[:12]}"
+
+
+def plan_targets(
+    targets: Sequence[CodeqlTarget],
+    *,
+    fetcher: JsonFetcher,
+    repo: str,
+    sha: str,
+    discovery: Discovery,
+    restrict_to: ChangedFiles | None,
+) -> TargetPlan:
+    """Decide which targets to analyse.
+
+    With `restrict_to` complete, a target runs only if a changed file is in
+    its scope or trigger paths. A target must then fit the C/C++ file limit,
+    counted over its scope alone.
+
+    Raises:
+        TargetsError: a scope directory of a target that would run doesn't
+            exist at `sha`. The run fails rather than quietly analysing
+            nothing.
+    """
+    selected: list[CodeqlTarget] = []
+    skipped: list[str] = []
+    for target in targets:
+        if restrict_to is not None and restrict_to.complete:
+            watched = target.scope + target.trigger_paths
+            if not any(
+                path_in_scope(changed, path)
+                for changed in restrict_to.paths
+                for path in watched
+            ):
+                skipped.append(f"{target.name} (not touched by this pull request)")
+                continue
+
+        where = ", ".join(target.scope)
+        try:
+            files = count_scope_cpp_files(
+                fetcher, repo=repo, sha=sha, discovery=discovery, scope=target.scope
+            )
+        except TargetsError as exc:
+            raise TargetsError(f"target {target.name!r}: {exc}") from exc
+        if files is None:
+            skipped.append(
+                f"{target.name} (the complete C/C++ file count under {where} is "
+                f"unavailable, so the {MAX_BUILDLESS_CPP_FILES:,}-file "
+                "standard-runner limit cannot be verified)"
+            )
+        elif files > MAX_BUILDLESS_CPP_FILES:
+            skipped.append(
+                f"{target.name} ({files:,} C/C++ files under {where} exceeds "
+                f"the {MAX_BUILDLESS_CPP_FILES:,}-file standard-runner limit)"
+            )
+        elif files == 0:
+            skipped.append(f"{target.name} (no C/C++ files under {where})")
+        else:
+            selected.append(target)
+    return TargetPlan(selected=tuple(selected), skipped=tuple(skipped))
+
+
 def _github_get(path: str, *, token: str, api_root: str) -> object:
     """GET a GitHub REST path and parse the JSON body.
 
@@ -416,10 +590,17 @@ def _fetch_linguist_languages(fetcher: JsonFetcher, repo: str) -> tuple[str, ...
 
 
 def _fetch_tree_paths(
-    fetcher: JsonFetcher, repo: str, sha: str
+    fetcher: JsonFetcher, repo: str, sha: str, subdir: str = ""
 ) -> tuple[tuple[str, ...], bool]:
-    """Return the blob paths of `sha`'s tree, and whether GitHub truncated it."""
-    payload = fetcher(f"/repos/{repo}/git/trees/{quote(sha, safe='')}?recursive=1")
+    """Return the blob paths of `sha`'s tree, and whether GitHub truncated it.
+
+    With `subdir`, only that directory's tree is read, with paths relative
+    to it. This works when the whole tree is too large to list.
+    """
+    ref = quote(sha, safe="")
+    if subdir:
+        ref = f"{ref}:{quote(subdir, safe='/')}"
+    payload = fetcher(f"/repos/{repo}/git/trees/{ref}?recursive=1")
     if not isinstance(payload, dict):
         raise DiscoveryError(f"tree for {sha} did not return an object")
     entries = payload.get("tree")
@@ -550,13 +731,26 @@ def render_summary(plan: CodeqlPlan) -> str:
     return "\n".join(lines)
 
 
+def render_targets_summary(plan: TargetPlan) -> str:
+    """Render the job summary lines for the scoped targets."""
+    lines = [
+        "### CodeQL targets",
+        "",
+        "- Selected: "
+        + (", ".join(f"`{target.name}`" for target in plan.selected) or "nothing"),
+    ]
+    if plan.skipped:
+        lines.append(f"- Skipped: {'; '.join(plan.skipped)}")
+    return "\n".join(lines)
+
+
 def resolve_timeout(requested_minutes: int) -> int:
     """Return the CodeQL job budget, honouring a caller's raise."""
     return max(DEFAULT_TIMEOUT_MINUTES, requested_minutes)
 
 
-def _normalize_config_path(config_path: str) -> str:
-    """Return a normalized repository-relative CodeQL config path."""
+def _normalize_config_path(config_path: str, label: str = "CodeQL config") -> str:
+    """Return a normalized repository-relative path to a file named by an input."""
     raw = config_path.strip()
     if not raw:
         return ""
@@ -565,20 +759,26 @@ def _normalize_config_path(config_path: str) -> str:
     path = PurePosixPath(normalized)
     if path.is_absolute():
         raise DiscoveryError(
-            f"CodeQL config path {config_path!r} must be relative to the repository"
+            f"{label} path {config_path!r} must be relative to the repository"
         )
     if normalized == ".." or normalized.startswith("../"):
         raise DiscoveryError(
-            f"CodeQL config path {config_path!r} resolves outside the repository"
+            f"{label} path {config_path!r} resolves outside the repository"
         )
     if normalized == ".":
-        raise DiscoveryError(f"CodeQL config path {config_path!r} does not name a file")
+        raise DiscoveryError(f"{label} path {config_path!r} does not name a file")
     return path.as_posix()
 
 
-def validate_config_path(config_path: str, checkout_root: Path) -> str:
-    """Validate and return a CodeQL config path relative to the scan target."""
-    normalized = _normalize_config_path(config_path)
+def validate_config_path(
+    config_path: str, checkout_root: Path, label: str = "CodeQL config"
+) -> str:
+    """Validate and return a path to a file in the scan target.
+
+    `label` names the file in errors ("CodeQL config", "CodeQL targets").
+    The path comes back relative to the scan target.
+    """
+    normalized = _normalize_config_path(config_path, label)
     if not normalized:
         return ""
 
@@ -586,20 +786,16 @@ def validate_config_path(config_path: str, checkout_root: Path) -> str:
         root = checkout_root.resolve(strict=True)
         resolved = (root / config_path.strip()).resolve(strict=True)
     except OSError as exc:
-        raise DiscoveryError(
-            f"CodeQL config file {config_path!r} does not exist"
-        ) from exc
+        raise DiscoveryError(f"{label} file {config_path!r} does not exist") from exc
 
     try:
         resolved.relative_to(root)
     except ValueError as exc:
         raise DiscoveryError(
-            f"CodeQL config path {config_path!r} resolves outside the repository"
+            f"{label} path {config_path!r} resolves outside the repository"
         ) from exc
     if not resolved.is_file():
-        raise DiscoveryError(
-            f"CodeQL config path {config_path!r} does not resolve to a file"
-        )
+        raise DiscoveryError(f"{label} path {config_path!r} does not resolve to a file")
     return normalized
 
 
@@ -638,6 +834,10 @@ def _changed_files_to_restrict_to(
     return changed_files
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() == "true"
+
+
 def main(argv: Sequence[str]) -> int:
     if argv:
         print(f"unexpected arguments: {' '.join(argv)}", file=sys.stderr)
@@ -656,6 +856,10 @@ def main(argv: Sequence[str]) -> int:
                 "skipped_languages": message,
                 "detection_source": DETECTION_PRIVATE_REPOSITORY_POLICY,
                 "tree_truncated": "false",
+                "targets_matrix": matrix,
+                "targets_enabled": "false",
+                "selected_targets": "",
+                "skipped_targets": "",
             }
         )
         gha_append_step_summary(
@@ -702,24 +906,75 @@ def main(argv: Sequence[str]) -> int:
         except (KeyError, FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Ignoring unreadable event payload: {exc}")
 
+    checkout_root = Path(os.environ.get("SCANNER_CHECKOUT_ROOT", ".scan-target"))
+    target_plan = TargetPlan()
+    has_targets = False
     try:
         config_path = validate_config_path(
-            os.environ.get("SCANNER_CODEQL_CONFIG_PATH", ""),
-            Path(os.environ.get("SCANNER_CHECKOUT_ROOT", ".scan-target")),
+            os.environ.get("SCANNER_CODEQL_CONFIG_PATH", ""), checkout_root
         )
+        targets_path = validate_config_path(
+            os.environ.get("SCANNER_CODEQL_TARGETS_PATH", ""),
+            checkout_root,
+            "CodeQL targets",
+        )
+        file_targets = (
+            load_targets(checkout_root / targets_path) if targets_path else ()
+        )
+        build_target = target_from_build_inputs(
+            build_mode=os.environ.get("SCANNER_CODEQL_BUILD_MODE", ""),
+            build_command=os.environ.get("SCANNER_CODEQL_BUILD_COMMAND", ""),
+            container=os.environ.get("SCANNER_CODEQL_BUILD_CONTAINER", ""),
+            scope=os.environ.get("SCANNER_CODEQL_SCOPE", ""),
+            sparse_checkout=os.environ.get("SCANNER_CODEQL_SPARSE_CHECKOUT", ""),
+            trigger_paths=os.environ.get("SCANNER_CODEQL_TRIGGER_PATHS", ""),
+            fail_on_findings=_env_flag("SCANNER_CODEQL_FAIL_ON_FINDINGS"),
+        )
+        names = [target.name for target in file_targets]
+        if build_target and build_target.name in names:
+            raise TargetsError(
+                f"the targets file can't name a target {build_target.name!r}; "
+                "that name is the build inputs' target"
+            )
         discovery = discover(fetcher, repo=repo, sha=sha, event=event)
+        restrict_to = _changed_files_to_restrict_to(
+            fetcher,
+            repo=repo,
+            event=event,
+            scan_mode=os.environ.get("SCANNER_SCAN_MODE", "changed"),
+            already_fetched=discovery.changed_files,
+            config_path=config_path,
+        )
         plan = build_plan(
             discovery,
-            restrict_to=_changed_files_to_restrict_to(
-                fetcher,
-                repo=repo,
-                event=event,
-                scan_mode=os.environ.get("SCANNER_SCAN_MODE", "changed"),
-                already_fetched=discovery.changed_files,
-                config_path=config_path,
-            ),
+            restrict_to=restrict_to,
+            manually_built=frozenset({"c-cpp"} if build_target else ()),
         )
-    except DiscoveryError as exc:
+        file_restrict_to = restrict_to
+        if restrict_to is not None and targets_path in restrict_to.paths:
+            print("CodeQL targets file changed; considering every target in it")
+            file_restrict_to = None
+        target_plans = [
+            plan_targets(
+                group,
+                fetcher=fetcher,
+                repo=repo,
+                sha=sha,
+                discovery=discovery,
+                restrict_to=group_restrict_to,
+            )
+            for group, group_restrict_to in (
+                ((build_target,) if build_target else (), restrict_to),
+                (file_targets, file_restrict_to),
+            )
+            if group
+        ]
+        target_plan = TargetPlan(
+            selected=tuple(t for tp in target_plans for t in tp.selected),
+            skipped=tuple(n for tp in target_plans for n in tp.skipped),
+        )
+        has_targets = bool(target_plans)
+    except (DiscoveryError, TargetsError) as exc:
         print(f"CodeQL language discovery failed: {exc}", file=sys.stderr)
         gha_append_step_summary(
             "### CodeQL language discovery\n\n"
@@ -743,6 +998,20 @@ def main(argv: Sequence[str]) -> int:
         print(f"Warning: {warning}")
     print(f"matrix = {matrix}")
 
+    # The CodeQL config is read from the checkout, so a sparse one keeps it.
+    config_directory = posixpath.dirname(config_path)
+    targets_matrix = target_plan.matrix(
+        timeout_minutes, (config_directory,) if config_directory else ()
+    )
+    if target_plan.selected:
+        print(
+            "CodeQL targets: "
+            f"{', '.join(target.name for target in target_plan.selected)}"
+        )
+    if target_plan.skipped:
+        print(f"CodeQL targets skipped: {'; '.join(target_plan.skipped)}")
+    print(f"targets matrix = {targets_matrix}")
+
     gha_set_output(
         {
             "matrix": matrix,
@@ -752,9 +1021,17 @@ def main(argv: Sequence[str]) -> int:
             "skipped_languages": ",".join(plan.skipped),
             "detection_source": plan.detection_source,
             "tree_truncated": "true" if plan.tree_truncated else "false",
+            "targets_matrix": targets_matrix,
+            "targets_enabled": "true" if target_plan.selected else "false",
+            "selected_targets": ",".join(
+                target.name for target in target_plan.selected
+            ),
+            "skipped_targets": "; ".join(target_plan.skipped),
         }
     )
     gha_append_step_summary(render_summary(plan))
+    if has_targets:
+        gha_append_step_summary(render_targets_summary(target_plan))
     return 0
 
 

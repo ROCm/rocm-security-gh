@@ -70,6 +70,65 @@ on:
         required: false
         type: string
         default: ""
+      codeql_build_mode:
+        description: >-
+          'none' (default) reads C/C++ without a build. 'manual' analyses
+          C/C++ by running codeql_build_command while CodeQL watches, in
+          place of the discovered C/C++ analysis.
+        required: false
+        type: string
+        default: none
+      codeql_build_command:
+        description: >-
+          Shell command that builds the code, run from the repository root.
+          Required with codeql_build_mode 'manual'.
+        required: false
+        type: string
+        default: ""
+      codeql_build_container:
+        description: >-
+          Optional image to build in, pinned by digest ('image@sha256:...').
+          The image must provide POSIX sh and CA certificates. Defaults to
+          the runner.
+        required: false
+        type: string
+        default: ""
+      codeql_scope:
+        description: >-
+          Newline-separated repository directories whose results are
+          reported with codeql_build_mode 'manual'. Defaults to the whole
+          repository.
+        required: false
+        type: string
+        default: ""
+      codeql_sparse_checkout:
+        description: >-
+          Newline-separated directories to check out besides the scope with
+          codeql_build_mode 'manual'. Defaults to a full checkout.
+        required: false
+        type: string
+        default: ""
+      codeql_trigger_paths:
+        description: >-
+          Newline-separated files or directories, besides the scope, whose
+          change runs the manual build on a pull request.
+        required: false
+        type: string
+        default: ""
+      codeql_fail_on_findings:
+        description: >-
+          Fail the manual build's check when results remain in its scope.
+        required: false
+        type: boolean
+        default: false
+      codeql_targets_path:
+        description: >-
+          Optional path to the repository's CodeQL targets file (TOML),
+          relative to the repository root. Each target builds part of the
+          repository and reports only results in its scope.
+        required: false
+        type: string
+        default: ""
       gitleaks_config_path:
         description: >-
           Optional path to the repository's gitleaks TOML config,
@@ -152,6 +211,14 @@ jobs:
     uses: $/.github/workflows/codeql.yml
     with:
       config_path: ${{ inputs.codeql_config_path }}
+      targets_path: ${{ inputs.codeql_targets_path }}
+      build_mode: ${{ inputs.codeql_build_mode }}
+      build_command: ${{ inputs.codeql_build_command }}
+      build_container: ${{ inputs.codeql_build_container }}
+      scope: ${{ inputs.codeql_scope }}
+      sparse_checkout: ${{ inputs.codeql_sparse_checkout }}
+      trigger_paths: ${{ inputs.codeql_trigger_paths }}
+      fail_on_findings: ${{ inputs.codeql_fail_on_findings }}
       scan_mode: ${{ inputs.scan_mode }}
       timeout_minutes: ${{ inputs.timeout_minutes }}
 
