@@ -576,7 +576,7 @@ def main(argv: list[str]) -> int:
         ignore_path = resolve_ignore_file(
             scanner="gitleaks",
             checkout_root=checkout_root,
-            filename=_IGNORE_FILENAME,
+            filenames=(_IGNORE_FILENAME,),
             configured_path=args.config_path,
         )
         # Only 'changed' mode derives a git range from the event, so 'all'
