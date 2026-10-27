@@ -104,6 +104,9 @@ jobs:
         uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           category: "/language:${{ matrix.language }}"
+          # Pull requests are ephemeral, so they never reach the Security tab;
+          # their findings go to the PR comment.
+          upload: ${{ github.event_name == 'pull_request' && 'never' || 'always' }}
           output: ${{ runner.temp }}/codeql-results-${{ matrix.language }}
 
       - name: Upload CodeQL findings
