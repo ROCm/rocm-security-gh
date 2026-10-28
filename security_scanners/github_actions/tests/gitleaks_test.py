@@ -19,6 +19,7 @@ from gitleaks import (
     _SUPPORTED_FORMATS,
     _determine_log_opts,
     _emit_non_sarif_reports,
+    _exclude_upstream_commits,
     _enrich_sarif_with_security_severity,
     _parse_report_formats,
     _resolve_config_path,
@@ -369,11 +370,11 @@ class DetermineLogOptsTest(unittest.TestCase):
         self.assertEqual(log_opts, "xxx..yyy")
         self.assertNotIn("--no-merges", log_opts)
 
-    def test_push_new_ref_returns_empty(self):
+    def test_push_new_ref_scans_only_the_pushed_ref(self):
         log_opts = _determine_log_opts(
             "changed", "push", {"before": "0" * 40, "after": "yyy"}
         )
-        self.assertEqual(log_opts, "")
+        self.assertEqual(log_opts, "yyy")
 
     def test_unknown_event_type_raises(self):
         with self.assertRaises(ValueError) as ctx:
@@ -393,6 +394,57 @@ class DetermineLogOptsTest(unittest.TestCase):
     def test_push_malformed_payload_raises_key_error(self):
         with self.assertRaises(KeyError):
             _determine_log_opts("changed", "push", {})
+
+
+class ExcludeUpstreamCommitsTest(unittest.TestCase):
+    """Tests for `_exclude_upstream_commits` and the fork-aware `all` mode."""
+
+    def _scope(self, commits: str, present: set[str], scan_mode="changed") -> str:
+        env = {"SCANNER_FORK_UPSTREAM_COMMITS": commits} if commits else {}
+
+        def fake_run(argv, **kwargs):
+            sha = argv[-1].removesuffix("^{commit}")
+            return mock.Mock(returncode=0 if sha in present else 1)
+
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("gitleaks.subprocess.run", side_effect=fake_run),
+        ):
+            if scan_mode == "all":
+                return _determine_log_opts("all", "schedule", {})
+            return _exclude_upstream_commits("aaa..bbb", Path("."))
+
+    def test_not_a_fork_keeps_the_range(self):
+        self.assertEqual(self._scope("", set()), "aaa..bbb")
+
+    def test_known_commits_are_excluded(self):
+        self.assertEqual(self._scope("mb tip", {"mb", "tip"}), "aaa..bbb --not mb tip")
+
+    def test_only_commits_present_in_the_checkout_are_named(self):
+        self.assertEqual(self._scope("mb tip", {"mb"}), "aaa..bbb --not mb")
+
+    def test_nothing_known_keeps_the_range(self):
+        self.assertEqual(self._scope("mb tip", set()), "aaa..bbb")
+
+    def test_all_mode_on_a_fork_excludes_upstream_history(self):
+        self.assertEqual(
+            self._scope("mb tip", {"mb"}, scan_mode="all"), "--all --not mb"
+        )
+
+    def test_all_mode_without_known_commits_scans_everything(self):
+        self.assertEqual(self._scope("mb tip", set(), scan_mode="all"), "")
+
+    def test_new_ref_push_excludes_upstream_history(self):
+        event = {"before": "0" * 40, "after": "yyy"}
+        with (
+            mock.patch.dict(
+                os.environ, {"SCANNER_FORK_UPSTREAM_COMMITS": "mb"}, clear=True
+            ),
+            mock.patch("gitleaks.subprocess.run", return_value=mock.Mock(returncode=0)),
+        ):
+            self.assertEqual(
+                _determine_log_opts("changed", "push", event), "yyy --not mb"
+            )
 
 
 class EnrichSarifTest(unittest.TestCase):

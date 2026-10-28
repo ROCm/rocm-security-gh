@@ -45,6 +45,12 @@ from security_scanners.utils.github_actions_api import (
     gha_load_github_event,
     gha_set_output,
 )
+from security_scanners.utils.fork_changes import (
+    fork_only_files,
+    restrict_to_fork_changes,
+    select_files,
+    split_git_paths,
+)
 from security_scanners.utils.step_summary import emit_reports
 from security_scanners.utils.scanner_config import (
     find_config_change,
@@ -318,6 +324,10 @@ def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str]
     return None
 
 
+def _is_python_path(relpath: str) -> bool:
+    return relpath.endswith(_PYTHON_EXTENSIONS)
+
+
 def _determine_changed_python_files(
     event_name: str,
     event: Mapping[str, object],
@@ -325,19 +335,22 @@ def _determine_changed_python_files(
     checkout_root: Path = Path("."),
     config_paths: tuple[str, ...] = _CONFIG_CANDIDATES,
 ) -> list[Path] | None:
-    """Return the changed Python source files inside `scan_path`, or `None`.
+    """Return the Python files to scan under `scan_path`, or `None`.
 
-    Semantics:
+    `checkout_root` is the scan target's repo root, where `git` runs and
+    against which the repo-relative paths in `git diff --name-only` are
+    resolved; `scan_path` may be a subdirectory of it.
 
-    * `None` — no usable diff range, or the bandit config itself changed;
-      caller should fall back to a full recursive scan of `scan_path`.
-    * `[]` — diff range was usable but contained no Python files under
-      `scan_path`; caller should treat this as a clean no-op.
-    * `[paths…]` — exact set of files for bandit to scan.
+    * `None` -- scan `scan_path` recursively: no usable diff range, or the
+      bandit config changed, and the repository isn't a fork.
+    * `[]` -- the scope held no Python files under `scan_path`; a clean no-op.
+    * `[paths...]` -- the exact files for bandit to scan. On a fork the
+      fallbacks above yield every Python file the fork changed relative to
+      its upstream, and the event's files are limited to those.
     """
     diff = _diff_range(event_name, event)
     if diff is None:
-        return None
+        return fork_only_files(scan_path, checkout_root, _is_python_path)
     base_sha, head_sha = diff
 
     # Best-effort fetch so the base SHA is reachable for the diff.
@@ -354,6 +367,7 @@ def _determine_changed_python_files(
                 "git",
                 "diff",
                 "--name-only",
+                "-z",
                 # D is here for the config check below: deleting a config
                 # switches the whole repository back to the default one,
                 # which is as much a config change as editing it. Deleted
@@ -366,6 +380,7 @@ def _determine_changed_python_files(
             check=True,
             capture_output=True,
             text=True,
+            errors="surrogateescape",
         )
     except subprocess.CalledProcessError as exc:
         log.warning(
@@ -375,9 +390,11 @@ def _determine_changed_python_files(
             exc.returncode,
             exc.stderr.strip() if exc.stderr else "",
         )
-        return None
+        return fork_only_files(scan_path, checkout_root, _is_python_path)
 
-    changed = result.stdout.splitlines()
+    changed = split_git_paths(result.stdout)
+    # On a fork, files that only came in from upstream aren't ours to scan.
+    changed = restrict_to_fork_changes(changed)
     config_change = find_config_change(changed, filenames=config_paths)
     if config_change is not None:
         log.info(
@@ -385,26 +402,9 @@ def _determine_changed_python_files(
             "every file in scope instead of the changed files alone",
             config_change,
         )
-        return None
+        return fork_only_files(scan_path, checkout_root, _is_python_path)
 
-    scan_root = scan_path.resolve()
-    files: list[Path] = []
-    for raw in changed:
-        relpath = raw.strip()
-        if not relpath.endswith(_PYTHON_EXTENSIONS):
-            continue
-        # `relpath` is relative to the repo root (`checkout_root`), not
-        # to this process's cwd, so it must be re-anchored there before
-        # any further path operations.
-        candidate = checkout_root / relpath
-        try:
-            candidate.resolve().relative_to(scan_root)
-        except ValueError:
-            continue
-        if not candidate.is_file():
-            continue
-        files.append(candidate)
-    return files
+    return select_files(changed, scan_path, checkout_root, _is_python_path)
 
 
 def _run_bandit(
@@ -685,7 +685,9 @@ def main(argv: list[str]) -> int:
         # fail on events that have no payload we can parse, even though
         # it never looks at one.
         if args.scan_mode == "all":
-            files: list[Path] | None = None
+            files: list[Path] | None = fork_only_files(
+                source_dir, checkout_root, _is_python_path
+            )
         else:
             files = _determine_changed_python_files(
                 event_name=os.environ.get("GITHUB_EVENT_NAME", ""),

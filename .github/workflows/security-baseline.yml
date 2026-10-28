@@ -125,6 +125,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      upstream_repository: ${{ steps.fork.outputs.upstream_repository }}
+      upstream_default_branch: ${{ steps.fork.outputs.upstream_default_branch }}
     steps:
       - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,6 +145,12 @@ jobs:
         env:
           SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: python -m security_scanners.utils.compute_scan_matrix
+
+      - name: Detect fork
+        id: fork
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -m security_scanners.utils.detect_fork
 
   codeql:
     if: >-
@@ -185,6 +193,9 @@ jobs:
 
       - name: Compute checkout fetch-depth
         id: depth
+        env:
+          SCANNER_NEEDS_HISTORY: ${{ matrix.needs_history }}
+          SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
         run: python -m security_scanners.utils.compute_pr_depth
 
       - name: Checkout scan target
@@ -194,9 +205,21 @@ jobs:
           path: .scan-target
           persist-credentials: false
 
+      - name: Compute fork-only changes
+        id: fork_diff
+        if: needs.plan.outputs.upstream_repository != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SCANNER_CHECKOUT_ROOT: .scan-target
+          SCANNER_UPSTREAM_REPOSITORY: ${{ needs.plan.outputs.upstream_repository }}
+          SCANNER_UPSTREAM_DEFAULT_BRANCH: ${{ needs.plan.outputs.upstream_default_branch }}
+        run: python -m security_scanners.utils.compute_fork_diff
+
       - name: Run ${{ matrix.scanner }}
         id: scan
         env:
+          SCANNER_FORK_CHANGES_FILE: ${{ steps.fork_diff.outputs.changes_file }}
+          SCANNER_FORK_UPSTREAM_COMMITS: ${{ steps.fork_diff.outputs.upstream_commits }}
           SCANNER_MODULE: ${{ matrix.module }}
           SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
           SCANNER_REPORT_FORMATS: >-

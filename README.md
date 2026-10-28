@@ -77,6 +77,27 @@ than a script here, so it gets a planning job that discovers the
 caller's languages and one analysis job per language. See
 [CodeQL](#codeql).
 
+### Forks
+
+A repository that is a fork scans only what it changed relative to its
+upstream, in both `changed` and `all` modes. Each scanner leg compares the
+checked-out commit with the upstream default branch, fetches their merge
+base, and keeps the files that differ from it. Bandit and Zizmor scan only
+those files (`all` mode: every such file; `changed` mode: the ones the event
+touched). Trivy scans a copy of each such file's directory (not its
+subdirectories), the regular files of its ancestor directories, and the
+local Terraform modules its `.tf` files reference, so module and
+parent-manifest context is kept without staging the whole tree; those
+context files may include upstream files, but only results for the
+fork-owned files reach the reports.
+Only the audited files (dependency manifests, IaC, Dockerfiles) count for
+Trivy. Gitleaks excludes the merge base's and the upstream tip's history.
+
+If the comparison fails, scanners run unfiltered. That covers a GitHub API
+that can't compare the two repositories and a merge base the checkout can't
+fetch (the checkout keeps no credentials, so a private repository may fall in
+this group). CodeQL is not filtered.
+
 ### Per-repository configuration
 
 Each scanner reads the config file the scanned repository ships, and
@@ -218,7 +239,9 @@ tree.
 - `report_formats`: `sarif` (default), `json`, `csv`, `junit`, and
   `human` (an alias for `csv`)
 - `scan_mode: changed` scans only the commits the calling event
-  introduced, and requires a `pull_request` or `push` payload.
+  introduced, and requires a `pull_request` or `push` payload. A push
+  that creates a ref scans the history reachable from the new tip, not
+  the commits only other refs reach.
 - Has no severity scale: every leak fails the job.
 
 ### Bandit
@@ -254,7 +277,9 @@ own regularly updated vulnerability, policy and license databases.
   dependency manifest, IaC or container file, and otherwise scans all of
   `scan_path`: trivy needs the whole subtree to resolve transitive
   dependencies and cross-file IaC references, so unlike bandit and zizmor
-  it is never handed an individual file list.
+  it is never handed an individual file list. A [fork](#forks) is the
+  exception: it scans a bounded copy of each of its own audited files'
+  surroundings.
 - Fails on findings at or above HIGH severity; reports still carry every
   finding. Runs trivy's `misconfig`, `vuln` and `license` scanners;
   `secret` is deliberately left out because gitleaks already covers

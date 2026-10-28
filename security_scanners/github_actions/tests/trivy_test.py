@@ -26,10 +26,189 @@ from trivy import (
     _resolve_config_path,
     _run_trivy,
     _tally_findings_by_severity,
+    _trivy_scan_root,
     _trivy_subprocess_env,
     get_trivy_binary,
     main,
 )
+from security_scanners.utils.fork_changes import fork_only_files
+
+
+class ForkOnlyFilesTest(unittest.TestCase):
+    def test_all_mode_selects_only_fork_owned_audited_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "package.json"
+            manifest.write_text("{}", encoding="utf-8")
+            changes = root / "fork-changes.txt"
+            changes.write_text("package.json\nREADME.md\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+            ):
+                self.assertEqual(
+                    fork_only_files(root, root, _is_audited_path), [manifest]
+                )
+
+    def test_new_ref_push_uses_the_fork_file_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "package.json"
+            manifest.write_text("{}", encoding="utf-8")
+            changes = root / "fork-changes.txt"
+            changes.write_text("package.json\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes)}
+            ):
+                files = _determine_changed_audited_files(
+                    event_name="push",
+                    event={"before": "0" * 40, "after": "def"},
+                    scan_path=root,
+                    checkout_root=root,
+                )
+        self.assertEqual(files, [manifest])
+
+    def _staged_files(self, root: Path, selected: list[Path]) -> list[str]:
+        with _trivy_scan_root(root, selected) as staged:
+            return sorted(
+                str(p.relative_to(staged)) for p in staged.rglob("*") if p.is_file()
+            )
+
+    def test_staging_copies_siblings_and_ancestor_files_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            infra = root / "infra"
+            (infra / "nested").mkdir(parents=True)
+            (root / "unrelated").mkdir()
+            selected = infra / "main.tf"
+            selected.write_text("resource {}\n", encoding="utf-8")
+            (infra / "variables.tf").write_text("", encoding="utf-8")
+            (infra / "nested" / "other.tf").write_text("", encoding="utf-8")
+            (root / "pom.xml").write_text("<project/>", encoding="utf-8")
+            (root / "unrelated" / "x.txt").write_text("", encoding="utf-8")
+            self.assertEqual(
+                self._staged_files(root, [selected]),
+                ["infra/main.tf", "infra/variables.tf", "pom.xml"],
+            )
+
+    def test_a_repo_root_file_does_not_stage_the_whole_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            for directory in ("a", "b/deep", ".git"):
+                (root / directory).mkdir(parents=True)
+                (root / directory / "file.txt").write_text("", encoding="utf-8")
+            selected = root / "Dockerfile"
+            selected.write_text("FROM scratch\n", encoding="utf-8")
+            self.assertEqual(self._staged_files(root, [selected]), ["Dockerfile"])
+
+    def test_staging_follows_local_terraform_module_references(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            (root / "env").mkdir(parents=True)
+            (root / "modules" / "vpc").mkdir(parents=True)
+            (root / "modules" / "unused").mkdir()
+            selected = root / "env" / "main.tf"
+            selected.write_text(
+                'module "vpc" {\n  source = "../modules/vpc"\n}\n'
+                'module "remote" {\n  source = "hashicorp/consul/aws"\n}\n',
+                encoding="utf-8",
+            )
+            (root / "modules" / "vpc" / "main.tf").write_text("", encoding="utf-8")
+            (root / "modules" / "unused" / "main.tf").write_text("", encoding="utf-8")
+            self.assertEqual(
+                self._staged_files(root, [selected]),
+                ["env/main.tf", "modules/vpc/main.tf"],
+            )
+
+    def test_module_references_cannot_escape_the_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            root.mkdir()
+            outside = Path(tmp, "outside")
+            outside.mkdir()
+            (outside / "secret.tf").write_text("", encoding="utf-8")
+            selected = root / "main.tf"
+            selected.write_text(
+                'module "x" {\n  source = "../outside"\n}\n', encoding="utf-8"
+            )
+            self.assertEqual(self._staged_files(root, [selected]), ["main.tf"])
+
+    def test_symlinked_module_directory_is_not_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            outside = Path(tmp, "outside")
+            root.mkdir()
+            outside.mkdir()
+            (outside / "module.tf").write_text("", encoding="utf-8")
+            (root / "external").symlink_to(outside, target_is_directory=True)
+            (root / "outside.tf").symlink_to(outside / "module.tf")
+            selected = root / "main.tf"
+            selected.write_text(
+                'module "x" {\n  source = "./external"\n}\n', encoding="utf-8"
+            )
+            original = Path.read_text
+            reads: list[Path] = []
+
+            def track_read(path: Path, *args, **kwargs):
+                reads.append(path.resolve())
+                return original(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", track_read):
+                self._staged_files(root, [selected])
+            self.assertNotIn((outside / "module.tf").resolve(), reads)
+
+    def test_staging_copies_internal_symlinks_and_skips_external_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            root.mkdir()
+            selected = root / "Dockerfile"
+            selected.write_text("FROM scratch\n", encoding="utf-8")
+            (root / "real.txt").write_text("content", encoding="utf-8")
+            (root / "internal.txt").symlink_to(root / "real.txt")
+            outside = Path(tmp, "outside.txt")
+            outside.write_text("", encoding="utf-8")
+            (root / "external.txt").symlink_to(outside)
+            self.assertEqual(
+                self._staged_files(root, [selected]),
+                ["Dockerfile", "internal.txt", "real.txt"],
+            )
+
+    def test_staging_works_when_the_scan_path_contains_a_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp, "real")
+            (real / "app").mkdir(parents=True)
+            (real / "app" / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+            (real / "pom.xml").write_text("<project/>", encoding="utf-8")
+            link = Path(tmp, "link")
+            link.symlink_to(real, target_is_directory=True)
+            self.assertEqual(
+                self._staged_files(link, [link / "app" / "Dockerfile"]),
+                ["app/Dockerfile", "pom.xml"],
+            )
+
+    def test_a_selected_file_below_a_symlinked_directory_is_still_staged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            (root / "real").mkdir(parents=True)
+            (root / "real" / "Dockerfile").write_text(
+                "FROM scratch\n", encoding="utf-8"
+            )
+            (root / "alias").symlink_to(root / "real", target_is_directory=True)
+            self.assertIn(
+                "alias/Dockerfile",
+                self._staged_files(root, [root / "alias" / "Dockerfile"]),
+            )
+
+    def test_a_selected_file_that_cannot_be_staged_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp, "checkout")
+            root.mkdir()
+            with self.assertRaises(RuntimeError):
+                self._staged_files(root, [root / "missing" / "Dockerfile"])
+
+    def test_nonfork_scan_uses_the_original_root(self):
+        root = Path("/scan-target")
+        with _trivy_scan_root(root, None) as staged:
+            self.assertEqual(staged, root)
 
 
 class MainTest(unittest.TestCase):
@@ -123,6 +302,45 @@ class MainTest(unittest.TestCase):
             run_trivy.call_args.kwargs["scanners"],
             ["misconfig", "vuln", "license"],
         )
+
+    def _run_all_mode(self, env: dict[str, str]) -> mock.Mock:
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch("trivy.gha_append_step_summary"),
+            mock.patch("trivy.gha_set_output"),
+            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+            mock.patch(
+                "trivy._run_trivy",
+                return_value={sev: 0 for sev in _SEVERITY_ORDER},
+            ) as run_trivy,
+        ):
+            self.assertEqual(
+                main(["--scan-mode", "all", "--source-dir", self._root]), 0
+            )
+        return run_trivy
+
+    def test_fork_scan_hands_trivy_only_fork_owned_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._root = tmp
+            manifest = Path(tmp, "package.json")
+            manifest.write_text("{}", encoding="utf-8")
+            changes = Path(tmp, "fork-changes.txt")
+            changes.write_text("package.json\n", encoding="utf-8")
+            run_trivy = self._run_all_mode(
+                {
+                    "SCANNER_FORK_CHANGES_FILE": str(changes),
+                    "SCANNER_CHECKOUT_ROOT": tmp,
+                }
+            )
+        self.assertEqual(run_trivy.call_args.kwargs["scan_files"], [manifest])
+
+    def test_nonfork_scan_hands_trivy_the_whole_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._root = tmp
+            with mock.patch.dict(os.environ, {}, clear=True):
+                run_trivy = self._run_all_mode({})
+        self.assertIsNone(run_trivy.call_args.kwargs["scan_files"])
 
 
 class SeverityGateTest(unittest.TestCase):
@@ -372,6 +590,16 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
     def test_config_change_alongside_other_files_still_widens(self):
         self.assertIsNone(self._changed("README.md\n.trivyignore\n"))
 
+    def test_config_change_on_a_fork_widens_only_to_fork_files(self):
+        manifest = Path("package.json")
+        manifest.write_text("{}", encoding="utf-8")
+        changes = Path("fork-changes.txt")
+        changes.write_text(".trivyignore\npackage.json\n", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ, {"SCANNER_FORK_CHANGES_FILE": str(changes.resolve())}
+        ):
+            self.assertEqual(self._changed(".trivyignore\n"), [manifest])
+
     def test_explicit_nested_config_change_widens(self):
         with mock.patch("trivy.subprocess.run") as run:
             run.side_effect = [
@@ -615,7 +843,9 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
         self._tmp_root = Path(self._tmp.name)
         self.addCleanup(self._tmp.cleanup)
 
-    def _run(self, ignore_path: Path | None) -> list[str]:
+    def _run(
+        self, ignore_path: Path | None, scan_files: list[Path] | None = None
+    ) -> list[str]:
         """Run `_run_trivy` against a stub trivy, return its first argv."""
         commands: list[list[str]] = []
 
@@ -634,6 +864,7 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
                 scanners=["vuln"],
                 scan_path=self._tmp_root,
                 ignore_path=ignore_path,
+                scan_files=scan_files,
             )
         return commands[0]
 
@@ -655,6 +886,88 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
 
     def test_no_ignorefile_flag_when_the_target_ships_none(self):
         self.assertNotIn("--ignorefile", self._run(None))
+
+    def _scoped_run(self, formats: list[str]):
+        """Run a fork-scoped `_run_trivy` against a stub; return (commands, counts, outputs)."""
+        selected = self._tmp_root / "Dockerfile"
+        selected.write_text("FROM scratch\n", encoding="utf-8")
+        (self._tmp_root / "upstream.Dockerfile").write_text("x\n", encoding="utf-8")
+        raw_report = {
+            "Results": [
+                {
+                    "Target": "Dockerfile",
+                    "Misconfigurations": [{"Severity": "HIGH"}],
+                },
+                {
+                    "Target": "upstream.Dockerfile",
+                    "Misconfigurations": [{"Severity": "CRITICAL"}] * 3,
+                },
+            ]
+        }
+        commands: list[list[str]] = []
+        converted_inputs: list[dict] = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            output = Path(cmd[cmd.index("--output") + 1])
+            if cmd[1] == "convert":
+                converted_inputs.append(json.loads(Path(cmd[-1]).read_text("utf-8")))
+                output.write_text("converted", encoding="utf-8")
+            else:
+                output.write_text(json.dumps(raw_report), encoding="utf-8")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        targets = [
+            _ReportTarget(fmt=fmt, path=self._tmp_root / f"report.{fmt}")
+            for fmt in formats
+        ]
+        with mock.patch("trivy.subprocess.run", side_effect=fake_run):
+            counts = _run_trivy(
+                Path("trivy"),
+                targets,
+                config_path="trivy.yaml",
+                scanners=["misconfig"],
+                scan_path=self._tmp_root,
+                scan_files=[selected],
+            )
+        return commands, counts, converted_inputs
+
+    def test_scoped_run_scans_once_and_converts_the_filtered_report(self):
+        commands, counts, converted = self._scoped_run(["sarif", "table"])
+        scans = [c for c in commands if c[1] == "fs"]
+        self.assertEqual(len(scans), 1)
+        self.assertEqual(
+            [c[c.index("--format") + 1] for c in commands if c[1] == "convert"],
+            ["sarif", "table"],
+        )
+        # Context files stay in the scanned tree but never reach a report.
+        self.assertEqual(
+            [[r["Target"] for r in report["Results"]] for report in converted],
+            [["Dockerfile"], ["Dockerfile"]],
+        )
+        self.assertEqual(counts["HIGH"], 1)
+        self.assertEqual(counts["CRITICAL"], 0)
+
+    def test_scoped_run_never_skips_files_or_grows_with_directory_size(self):
+        commands, _, _ = self._scoped_run(["sarif"])
+        for cmd in commands:
+            self.assertNotIn("--skip-files", cmd)
+
+    def test_scoped_json_report_holds_only_selected_targets(self):
+        self._scoped_run(["json"])
+        report = json.loads((self._tmp_root / "report.json").read_text("utf-8"))
+        self.assertEqual([r["Target"] for r in report["Results"]], ["Dockerfile"])
+
+    def test_package_list_is_requested_only_for_sbom_formats(self):
+        for formats, expected in (
+            (["sarif"], False),
+            (["sarif", "cyclonedx"], True),
+            (["spdx-json"], True),
+        ):
+            with self.subTest(formats=formats):
+                commands, _, _ = self._scoped_run(formats)
+                scan = next(c for c in commands if c[1] == "fs")
+                self.assertEqual("--list-all-pkgs" in scan, expected)
 
 
 class IgnoreFileLocationTest(unittest.TestCase):
