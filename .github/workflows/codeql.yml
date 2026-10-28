@@ -1,8 +1,9 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
-# CodeQL for whichever repository called the security baseline, with the
-# language matrix discovered per run rather than configured.
+# CodeQL for whichever repository called the security baseline. Languages are
+# discovered per run; scoped targets with their own build are declared in the
+# repository's targets file (see security_scanners/utils/codeql_targets.py).
 
 name: CodeQL
 
@@ -17,6 +18,66 @@ on:
         required: false
         type: string
         default: ""
+      targets_path:
+        description: >-
+          Optional path to the scan target's CodeQL targets file (TOML),
+          relative to the repository root. Each target builds part of the
+          repository and reports only results in its scope. The path must
+          resolve to a file inside the target checkout.
+        required: false
+        type: string
+        default: ""
+      build_mode:
+        description: >-
+          'none' (default) reads C/C++ without a build. 'manual' analyses
+          C/C++ by running build_command while CodeQL watches, in place of
+          the discovered C/C++ analysis.
+        required: false
+        type: string
+        default: none
+      build_command:
+        description: >-
+          Shell command that builds the code, run from the repository root.
+          Required with build_mode 'manual'.
+        required: false
+        type: string
+        default: ""
+      build_container:
+        description: >-
+          Optional image to build in, pinned by digest ('image@sha256:...').
+          The image must provide POSIX sh and CA certificates. Defaults to
+          the runner.
+        required: false
+        type: string
+        default: ""
+      scope:
+        description: >-
+          Newline-separated repository directories whose results are
+          reported with build_mode 'manual'. Defaults to the whole
+          repository.
+        required: false
+        type: string
+        default: ""
+      sparse_checkout:
+        description: >-
+          Newline-separated directories to check out besides the scope with
+          build_mode 'manual'. Defaults to a full checkout.
+        required: false
+        type: string
+        default: ""
+      trigger_paths:
+        description: >-
+          Newline-separated files or directories, besides the scope, whose
+          change runs the manual build on a pull request.
+        required: false
+        type: string
+        default: ""
+      fail_on_findings:
+        description: >-
+          Fail the manual build's check when results remain in its scope.
+        required: false
+        type: boolean
+        default: false
       scan_mode:
         description: >-
           'changed' (default) analyses only the languages the calling
@@ -46,6 +107,9 @@ jobs:
       enabled: ${{ steps.codeql.outputs.enabled }}
       selected_languages: ${{ steps.codeql.outputs.selected_languages }}
       config_path: ${{ steps.codeql.outputs.config_path }}
+      targets_matrix: ${{ steps.codeql.outputs.targets_matrix }}
+      targets_enabled: ${{ steps.codeql.outputs.targets_enabled }}
+      selected_targets: ${{ steps.codeql.outputs.selected_targets }}
     steps:
       - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,7 +119,9 @@ jobs:
           persist-credentials: false
 
       - name: Checkout scan target for config validation
-        if: inputs.config_path != '' && github.event.repository.private != true
+        if: >-
+          (inputs.config_path != '' || inputs.targets_path != '') &&
+          github.event.repository.private != true
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: .scan-target
@@ -72,6 +138,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           SCANNER_CHECKOUT_ROOT: .scan-target
           SCANNER_CODEQL_CONFIG_PATH: ${{ inputs.config_path }}
+          SCANNER_CODEQL_TARGETS_PATH: ${{ inputs.targets_path }}
+          SCANNER_CODEQL_BUILD_MODE: ${{ inputs.build_mode }}
+          SCANNER_CODEQL_BUILD_COMMAND: ${{ inputs.build_command }}
+          SCANNER_CODEQL_BUILD_CONTAINER: ${{ inputs.build_container }}
+          SCANNER_CODEQL_SCOPE: ${{ inputs.scope }}
+          SCANNER_CODEQL_SPARSE_CHECKOUT: ${{ inputs.sparse_checkout }}
+          SCANNER_CODEQL_TRIGGER_PATHS: ${{ inputs.trigger_paths }}
+          SCANNER_CODEQL_FAIL_ON_FINDINGS: ${{ inputs.fail_on_findings }}
           SCANNER_REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           SCANNER_SCAN_MODE: ${{ inputs.scan_mode }}
           SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
@@ -120,9 +194,195 @@ jobs:
           path: ${{ runner.temp }}/codeql-results-${{ matrix.language }}
           if-no-files-found: ignore
 
+  # Builds one target, in its container if it has one, and hands the raw
+  # results to `report-targets`, which runs on the plain runner.
+  analyze-targets:
+    name: target ${{ matrix.name }}
+    needs: plan
+    if: needs.plan.outputs.targets_enabled == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout_minutes }}
+    # Empty means the runner itself. The planner accepts only digest-pinned
+    # images, which zizmor can't see through the matrix.
+    container: ${{ matrix.container }} # zizmor: ignore[unpinned-images]
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.targets_matrix) }}
+    steps:
+      # Checkout and setup-python make HTTPS requests before the bootstrap
+      # module can install Bash and Git.
+      - name: Verify build container CA certificates
+        if: matrix.container != ''
+        shell: sh
+        run: |
+          for bundle in \
+            /etc/ssl/certs/ca-certificates.crt \
+            /etc/pki/tls/certs/ca-bundle.crt \
+            /etc/ssl/ca-bundle.pem \
+            /etc/ca-certificates/extracted/tls-ca-bundle.pem; do
+            if [ -s "${bundle}" ]; then
+              exit 0
+            fi
+          done
+          echo "::error::The build container must provide a CA certificate bundle."
+          exit 1
+
+      - name: Checkout security-gh scan tooling
+        if: matrix.container != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .security-tooling
+          persist-credentials: false
+
+      - name: Set up Python
+        if: matrix.container != ''
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Run steps need Bash, and sparse checkout needs Git.
+      - name: Install build container prerequisites
+        if: matrix.container != ''
+        shell: sh
+        env:
+          PYTHONPATH: .security-tooling
+        run: python -m security_scanners.utils.codeql_container_bootstrap
+
+      - name: Checkout scan target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Empty is a full checkout.
+          sparse-checkout: ${{ matrix.sparse_checkout }}
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: manual
+          queries: security-extended
+          config-file: ${{ needs.plan.outputs.config_path }}
+
+      # Via the environment, so it isn't spliced into the script.
+      - name: Build
+        env:
+          BUILD_COMMAND: ${{ matrix.build_command }}
+        run: bash -eo pipefail -c "${BUILD_COMMAND}"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          category: "/target:${{ matrix.name }}"
+          # `report-targets` uploads, after dropping out-of-scope results.
+          upload: never
+          output: ${{ runner.temp }}/codeql-results
+
+      # Lets the filter place absolute URIs in the SARIF.
+      - name: Record the analysis directory
+        run: printf '%s\n' "${GITHUB_WORKSPACE}" > "${RUNNER_TEMP}/codeql-results/source-root.txt"
+
+      - name: Upload raw results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-target-raw-${{ matrix.name }}
+          path: ${{ runner.temp }}/codeql-results
+          retention-days: 1
+          if-no-files-found: error
+
+  report-targets:
+    name: target ${{ matrix.name }} results
+    needs: [plan, analyze-targets]
+    if: >-
+      !cancelled() && needs.plan.outputs.targets_enabled == 'true' &&
+      needs.analyze-targets.result != 'skipped'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.targets_matrix) }}
+    steps:
+      - name: Checkout security-gh scan tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      # The upload only needs the commit, not the files.
+      - name: Checkout scan target
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .scan-target
+          sparse-checkout: .github
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # No artifact when the analysis failed; that failure is reported there.
+      - name: Download raw results
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: codeql-target-raw-${{ matrix.name }}
+          path: ${{ runner.temp }}/codeql-raw
+
+      - name: Keep the results in scope
+        id: filter
+        if: steps.download.outcome == 'success'
+        env:
+          SCANNER_TARGET_NAME: ${{ matrix.name }}
+          SCANNER_TARGET_SCOPE: ${{ toJSON(matrix.scope) }}
+          SCANNER_SARIF_DIR: ${{ runner.temp }}/codeql-raw
+          SCANNER_FILTERED_SARIF_DIR: ${{ runner.temp }}/codeql-filtered
+        run: python -m security_scanners.utils.codeql_scope_filter
+
+      # Pull requests are ephemeral, so they never reach the Security tab;
+      # their findings go to the comment below.
+      - name: Upload SARIF report to code scanning
+        if: >-
+          steps.filter.outputs.sarif_path != '' &&
+          github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: ${{ steps.filter.outputs.sarif_path }}
+          category: "/target:${{ matrix.name }}"
+          checkout_path: .scan-target
+
+      - name: Upload CodeQL target findings
+        # Only same-repository pull requests get a findings comment.
+        if: >-
+          steps.filter.outputs.sarif_path != '' &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-report-target-${{ matrix.name }}
+          path: ${{ steps.filter.outputs.sarif_path }}
+          if-no-files-found: ignore
+
+      - name: Fail on findings in scope
+        if: >-
+          matrix.fail_on_findings && steps.filter.outputs.alerts != '' &&
+          steps.filter.outputs.alerts != '0'
+        env:
+          ALERTS: ${{ steps.filter.outputs.alerts }}
+          TARGET: ${{ matrix.name }}
+        run: |
+          echo "::error::CodeQL found ${ALERTS} alert(s) in target ${TARGET}; they are listed by the filter step and, outside pull requests, in code scanning."
+          exit 1
+
   complete:
     name: complete
-    needs: [plan, analyze]
+    needs: [plan, analyze, analyze-targets, report-targets]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -132,14 +392,26 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           ANALYSIS_RESULT: ${{ needs.analyze.result }}
           LANGUAGES: ${{ needs.plan.outputs.selected_languages }}
+          TARGETS_RESULT: ${{ needs.analyze-targets.result }}
+          TARGETS_REPORT_RESULT: ${{ needs.report-targets.result }}
+          TARGETS: ${{ needs.plan.outputs.selected_targets }}
         run: |
           echo "Language discovery: ${PLAN_RESULT}"
           echo "Analysis: ${ANALYSIS_RESULT} (${LANGUAGES:-no languages})"
+          echo "Targets: ${TARGETS_RESULT}, reported: ${TARGETS_REPORT_RESULT} (${TARGETS:-no targets})"
           if [[ "${PLAN_RESULT}" != "success" ]]; then
             echo "::error::CodeQL language discovery did not succeed"
             exit 1
           fi
           if [[ "${ANALYSIS_RESULT}" != "success" && "${ANALYSIS_RESULT}" != "skipped" ]]; then
             echo "::error::CodeQL analysis did not succeed"
+            exit 1
+          fi
+          if [[ "${TARGETS_RESULT}" != "success" && "${TARGETS_RESULT}" != "skipped" ]]; then
+            echo "::error::CodeQL target analysis did not succeed"
+            exit 1
+          fi
+          if [[ "${TARGETS_REPORT_RESULT}" != "success" && "${TARGETS_REPORT_RESULT}" != "skipped" ]]; then
+            echo "::error::CodeQL target results did not report successfully"
             exit 1
           fi
