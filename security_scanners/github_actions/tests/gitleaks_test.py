@@ -281,13 +281,15 @@ class RunGitleaksWorkingDirectoryTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.addCleanup(os.chdir, self._original_cwd)
 
-    def _invoke(self) -> tuple[list[str], dict[str, object]]:
+    def _invoke(self, fmt: str = "csv") -> tuple[list[str], dict[str, object]]:
         """Return the argv and subprocess kwargs of a stubbed gitleaks run."""
         calls: list[tuple[list[str], dict[str, object]]] = []
 
         def fake_run(cmd, **kwargs):
             calls.append((cmd, kwargs))
-            Path(cmd[cmd.index("--report-path") + 1]).write_text("", encoding="utf-8")
+            report_path = Path(cmd[cmd.index("--report-path") + 1])
+            report_content = '{"runs": [{"results": []}]}' if fmt == "sarif" else ""
+            report_path.write_text(report_content, encoding="utf-8")
             return mock.Mock(returncode=0)
 
         # Paths as main() has them: relative to this process's cwd, which
@@ -295,7 +297,7 @@ class RunGitleaksWorkingDirectoryTest(unittest.TestCase):
         with mock.patch("gitleaks.subprocess.run", side_effect=fake_run):
             _run_gitleaks(
                 Path("bin/gitleaks"),
-                [_ReportTarget(fmt="csv", path=Path("gitleaks-report.csv"))],
+                [_ReportTarget(fmt=fmt, path=Path(f"gitleaks-report.{fmt}"))],
                 config_path=".scan-target/gitleaks.toml",
                 log_opts="",
                 source_dir=Path(".scan-target"),
@@ -328,6 +330,10 @@ class RunGitleaksWorkingDirectoryTest(unittest.TestCase):
         cmd, _ = self._invoke()
         report = Path(cmd[cmd.index("--report-path") + 1])
         self.assertEqual(report, (self._tooling_root / "gitleaks-report.csv").resolve())
+
+    def test_sarif_scan_does_not_enable_finding_logs(self):
+        cmd, _ = self._invoke("sarif")
+        self.assertNotIn("--verbose", cmd)
 
 
 class DetermineLogOptsTest(unittest.TestCase):

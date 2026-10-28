@@ -85,8 +85,9 @@ on:
           Optional path to the repository's trivy YAML config, relative
           to the repository root. When omitted, conventional root-level
           names are discovered before the baseline default is used.
-          .trivyignore is read from this file's directory, then from the
-          repository root.
+          .trivyignore.yaml is preferred, with .trivyignore as a fallback;
+          the selected file is read from this file's directory, then from
+          the repository root.
         required: false
         type: string
         default: ""

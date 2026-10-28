@@ -323,8 +323,9 @@ class IsAuditedPathTest(unittest.TestCase):
 
     def test_config_files_are_not_part_of_the_filter(self):
         # A config change widens the run to a full scan instead of being
-        # filtered in as though it were a manifest, so that a changed
-        # .trivyignore counts too. See ConfigChangeWidensTheScanTest.
+        # filtered in as though it were a manifest, so that changed Trivy
+        # configuration and ignore files count too. See
+        # ConfigChangeWidensTheScanTest.
         self.assertFalse(_is_audited_path("trivy.yaml"))
         self.assertFalse(_is_audited_path(".trivyignore"))
 
@@ -357,10 +358,14 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
             )
 
     def test_config_and_ignore_file_changes_widen_the_scan(self):
-        # .trivyignore in particular was invisible to the manifest/IaC
-        # filter, so suppressing a CVE could land without a single scan
-        # confirming what it suppressed.
-        for config in ("trivy.yaml", "trivy.yml", ".trivyignore"):
+        # Ignore files are invisible to the manifest/IaC filter, so a
+        # suppression could otherwise land without a scan confirming it.
+        for config in (
+            "trivy.yaml",
+            "trivy.yml",
+            ".trivyignore.yaml",
+            ".trivyignore",
+        ):
             with self.subTest(config=config):
                 self.assertIsNone(self._changed(f"{config}\n"))
 
@@ -396,7 +401,7 @@ class ConfigChangeWidensTheScanTest(unittest.TestCase):
         # config, which changes what counts as a finding everywhere. Git
         # only reports deletions when D is in --diff-filter, so this also
         # guards that flag.
-        for config in ("trivy.yaml", ".trivyignore"):
+        for config in ("trivy.yaml", ".trivyignore.yaml", ".trivyignore"):
             with self.subTest(config=config):
                 self.assertIsNone(self._changed(f"{config}\n"))
 
@@ -603,7 +608,7 @@ class TallyFindingsBySeverityTest(unittest.TestCase):
 
 
 class RunTrivyIgnoreFileTest(unittest.TestCase):
-    """Tests that a scanned repository's `.trivyignore` is honoured."""
+    """Tests that a scanned repository's Trivy ignore file is honoured."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -633,13 +638,19 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
         return commands[0]
 
     def test_ignorefile_is_passed_when_the_target_ships_one(self):
-        # trivy resolves .trivyignore against its working directory, which
-        # is this repo's checkout, so a scanned repository's accepted-risk
-        # entries only apply if the path is explicit.
+        # Trivy resolves an ignore filename against its working directory,
+        # which is this repo's checkout, so a scanned repository's
+        # accepted-risk entries only apply if the path is explicit.
         ignore_path = self._tmp_root / ".trivyignore"
         ignore_path.write_text("CVE-2021-44228\n", encoding="utf-8")
         cmd = self._run(ignore_path)
         self.assertIn("--ignorefile", cmd)
+        self.assertEqual(cmd[cmd.index("--ignorefile") + 1], str(ignore_path))
+
+    def test_yaml_ignorefile_is_passed_when_the_target_ships_one(self):
+        ignore_path = self._tmp_root / ".trivyignore.yaml"
+        ignore_path.write_text("misconfigurations: []\n", encoding="utf-8")
+        cmd = self._run(ignore_path)
         self.assertEqual(cmd[cmd.index("--ignorefile") + 1], str(ignore_path))
 
     def test_no_ignorefile_flag_when_the_target_ships_none(self):
@@ -647,7 +658,7 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
 
 
 class IgnoreFileLocationTest(unittest.TestCase):
-    """Where main() looks for `.trivyignore` relative to the config."""
+    """Where main() looks for Trivy ignore files relative to the config."""
 
     CONFIG_DIR = ".github/scan_tools_configs"
 
@@ -697,9 +708,42 @@ class IgnoreFileLocationTest(unittest.TestCase):
             ignore,
         )
 
+    def test_yaml_ignore_file_is_preferred_beside_the_config(self):
+        ignore = self._root / self.CONFIG_DIR / ".trivyignore.yaml"
+        ignore.write_text("misconfigurations: []\n", encoding="utf-8")
+        self.assertEqual(
+            self._ignore_path_passed_to_trivy(
+                "--config-path", f"{self.CONFIG_DIR}/trivy.yml"
+            ),
+            ignore,
+        )
+
+    def test_yaml_ignore_file_wins_over_plain_file_in_the_same_location(self):
+        yaml_ignore = self._root / self.CONFIG_DIR / ".trivyignore.yaml"
+        yaml_ignore.write_text("misconfigurations: []\n", encoding="utf-8")
+        (self._root / self.CONFIG_DIR / ".trivyignore").write_text(
+            "CVE-2021-44228\n", encoding="utf-8"
+        )
+        self.assertEqual(
+            self._ignore_path_passed_to_trivy(
+                "--config-path", f"{self.CONFIG_DIR}/trivy.yml"
+            ),
+            yaml_ignore,
+        )
+
     def test_root_ignore_file_applies_when_none_sits_beside_the_config(self):
         ignore = self._root / ".trivyignore"
         ignore.write_text("CVE-2021-44228\n", encoding="utf-8")
+        self.assertEqual(
+            self._ignore_path_passed_to_trivy(
+                "--config-path", f"{self.CONFIG_DIR}/trivy.yml"
+            ),
+            ignore,
+        )
+
+    def test_yaml_root_ignore_file_applies_when_none_sits_beside_the_config(self):
+        ignore = self._root / ".trivyignore.yaml"
+        ignore.write_text("misconfigurations: []\n", encoding="utf-8")
         self.assertEqual(
             self._ignore_path_passed_to_trivy(
                 "--config-path", f"{self.CONFIG_DIR}/trivy.yml"
@@ -715,29 +759,31 @@ class IgnoreFileLocationTest(unittest.TestCase):
 
     def test_editing_the_ignore_file_beside_the_config_widens_the_scan(self):
         # A PR that only touches the nested ignore file must still reach
-        # trivy: the manifest/IaC filter would otherwise see no audited
+        # Trivy: the manifest/IaC filter would otherwise see no audited
         # file and skip the run, leaving the suppression unexercised.
-        with (
-            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
-            mock.patch(
-                "trivy.gha_load_github_event",
-                return_value={"before": "abc", "after": "def"},
-            ),
-            mock.patch("trivy.subprocess.run") as run,
-        ):
-            run.side_effect = [
-                mock.Mock(returncode=0, stdout="", stderr=""),
-                mock.Mock(
-                    returncode=0,
-                    stdout=f"{self.CONFIG_DIR}/.trivyignore\n",
-                    stderr="",
-                ),
-            ]
-            rc, run_trivy = self._main(
-                "changed", "--config-path", f"{self.CONFIG_DIR}/trivy.yml"
-            )
-        self.assertEqual(rc, 0)
-        run_trivy.assert_called_once()
+        for filename in (".trivyignore.yaml", ".trivyignore"):
+            with self.subTest(filename=filename):
+                with (
+                    mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": "push"}),
+                    mock.patch(
+                        "trivy.gha_load_github_event",
+                        return_value={"before": "abc", "after": "def"},
+                    ),
+                    mock.patch("trivy.subprocess.run") as run,
+                ):
+                    run.side_effect = [
+                        mock.Mock(returncode=0, stdout="", stderr=""),
+                        mock.Mock(
+                            returncode=0,
+                            stdout=f"{self.CONFIG_DIR}/{filename}\n",
+                            stderr="",
+                        ),
+                    ]
+                    rc, run_trivy = self._main(
+                        "changed", "--config-path", f"{self.CONFIG_DIR}/trivy.yml"
+                    )
+                self.assertEqual(rc, 0)
+                run_trivy.assert_called_once()
 
 
 class ResolveConfigPathTest(unittest.TestCase):

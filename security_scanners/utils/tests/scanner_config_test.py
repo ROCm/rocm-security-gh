@@ -210,7 +210,9 @@ class ResolveIgnoreFileTest(unittest.TestCase):
     def test_returns_none_when_the_target_ships_no_ignore_file(self):
         self.assertIsNone(
             resolve_ignore_file(
-                scanner="tool", checkout_root=self._target_root, filename=".toolignore"
+                scanner="tool",
+                checkout_root=self._target_root,
+                filenames=(".toolignore",),
             )
         )
 
@@ -219,7 +221,9 @@ class ResolveIgnoreFileTest(unittest.TestCase):
         ignore_file.write_text("fingerprint-1\n", encoding="utf-8")
         self.assertEqual(
             resolve_ignore_file(
-                scanner="tool", checkout_root=self._target_root, filename=".toolignore"
+                scanner="tool",
+                checkout_root=self._target_root,
+                filenames=(".toolignore",),
             ),
             ignore_file,
         )
@@ -232,7 +236,7 @@ class ResolveIgnoreFileTest(unittest.TestCase):
             resolve_ignore_file(
                 scanner="tool",
                 checkout_root=self._target_root,
-                filename=".toolignore",
+                filenames=(".toolignore",),
                 configured_path="security_tools/tool.yml",
             ),
             beside,
@@ -248,7 +252,7 @@ class ResolveIgnoreFileTest(unittest.TestCase):
             resolve_ignore_file(
                 scanner="tool",
                 checkout_root=self._target_root,
-                filename=".toolignore",
+                filenames=(".toolignore",),
                 configured_path="security_tools/tool.yml",
             ),
             beside,
@@ -262,7 +266,7 @@ class ResolveIgnoreFileTest(unittest.TestCase):
             resolve_ignore_file(
                 scanner="tool",
                 checkout_root=self._target_root,
-                filename=".toolignore",
+                filenames=(".toolignore",),
                 configured_path="security_tools/tool.yml",
             ),
             root_ignore,
@@ -276,7 +280,9 @@ class ResolveIgnoreFileTest(unittest.TestCase):
         nested.write_text("nested\n", encoding="utf-8")
         self.assertIsNone(
             resolve_ignore_file(
-                scanner="tool", checkout_root=self._target_root, filename=".toolignore"
+                scanner="tool",
+                checkout_root=self._target_root,
+                filenames=(".toolignore",),
             )
         )
 
@@ -285,7 +291,7 @@ class ResolveIgnoreFileTest(unittest.TestCase):
             resolve_ignore_file(
                 scanner="tool",
                 checkout_root=self._target_root,
-                filename=".toolignore",
+                filenames=(".toolignore",),
                 configured_path="../tool.yml",
             )
 
@@ -298,7 +304,7 @@ class ResolveIgnoreFileTest(unittest.TestCase):
             resolve_ignore_file(
                 scanner="tool",
                 checkout_root=self._target_root,
-                filename=".toolignore",
+                filenames=(".toolignore",),
             )
 
 
@@ -314,7 +320,7 @@ class IgnoreFilePathsTest(unittest.TestCase):
         return ignore_file_paths(
             checkout_root=self._target_root,
             configured_path=configured_path,
-            filename=".toolignore",
+            filenames=(".toolignore",),
         )
 
     def test_no_explicit_config_means_the_root_only(self):
@@ -333,6 +339,21 @@ class IgnoreFilePathsTest(unittest.TestCase):
         self.assertEqual(
             self._paths("./security_tools/../security_tools/tool.yml"),
             ("security_tools/.toolignore", ".toolignore"),
+        )
+
+    def test_multiple_names_preserve_precedence(self):
+        self.assertEqual(
+            ignore_file_paths(
+                checkout_root=self._target_root,
+                configured_path=".github/scan_tools_configs/tool.yml",
+                filenames=(".toolignore.yaml", ".toolignore"),
+            ),
+            (
+                ".github/scan_tools_configs/.toolignore.yaml",
+                ".github/scan_tools_configs/.toolignore",
+                ".toolignore.yaml",
+                ".toolignore",
+            ),
         )
 
     def test_absolute_path_is_rejected(self):

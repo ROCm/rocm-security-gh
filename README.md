@@ -126,12 +126,12 @@ Each scanner has its own way to record a finding as triaged. Two of them
 use a dedicated ignore file; the others suppress through a comment next to
 the code or an entry in the scanner's config:
 
-| Scanner  | Ignore file                     | Inline suppression                             | In the scanner's config                       |
-| -------- | ------------------------------- | ---------------------------------------------- | --------------------------------------------- |
-| gitleaks | `.gitleaksignore`, fingerprints | `gitleaks:allow` comment on the line           | `[[allowlists]]`                              |
-| trivy    | `.trivyignore`, finding IDs     | --                                             | `scan.skip-dirs`, `scan.skip-files`           |
-| bandit   | none                            | `# nosec <test ID>` comment on the line        | `skips`, `tests`, `exclude_dirs`              |
-| zizmor   | none                            | `# zizmor: ignore[<rule>]` comment on the line | `rules.<rule>.ignore`, `rules.<rule>.disable` |
+| Scanner  | Ignore file                                       | Inline suppression                             | In the scanner's config                       |
+| -------- | ------------------------------------------------- | ---------------------------------------------- | --------------------------------------------- |
+| gitleaks | `.gitleaksignore`, fingerprints                   | `gitleaks:allow` comment on the line           | `[[allowlists]]`                              |
+| trivy    | `.trivyignore.yaml` / `.trivyignore`, finding IDs | --                                             | `scan.skip-dirs`, `scan.skip-files`           |
+| bandit   | none                                              | `# nosec <test ID>` comment on the line        | `skips`, `tests`, `exclude_dirs`              |
+| zizmor   | none                                              | `# zizmor: ignore[<rule>]` comment on the line | `rules.<rule>.ignore`, `rules.<rule>.disable` |
 
 The syntax for each is documented in the comments of the scanner's default
 config under `.github/scan_tools_configs/`, which is also the starting
@@ -139,15 +139,19 @@ point to copy into a repository.
 
 Where the ignore file lives follows the config:
 
-- With no explicit config path, `.gitleaksignore` and `.trivyignore` are
-  read from the repository root, where the tools themselves look.
+- With no explicit config path, `.gitleaksignore` and Trivy's
+  `.trivyignore.yaml` / `.trivyignore` are read from the repository root,
+  where the tools themselves look.
 - With an explicit `gitleaks_config_path` or `trivy_config_path`, the
   ignore file is looked for in the same directory as that config first, then
   at the repository root. For
-  `trivy_config_path: .github/scan_tools_configs/trivy.yml` that is
-  `.github/scan_tools_configs/.trivyignore`, then `.trivyignore`.
-- Trivy uses the first file found on its own and never merges, so a
-  `.trivyignore` beside the config replaces a root-level one. Gitleaks also
+  `trivy_config_path: .github/scan_tools_configs/trivy.yml` the YAML name is
+  preferred in each location, so the order is
+  `.github/scan_tools_configs/.trivyignore.yaml`,
+  `.github/scan_tools_configs/.trivyignore`, `.trivyignore.yaml`, then
+  `.trivyignore`.
+- Trivy uses the first file found and never merges, so an ignore file beside
+  the config replaces a root-level one. Gitleaks also
   reads `.gitleaksignore` from the directory it scans on its own (the
   repository root unless `scan_path` is set), so a root-level file stays in
   effect alongside the one beside the config and their entries combine.
