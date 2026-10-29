@@ -251,10 +251,10 @@ own regularly updated vulnerability, policy and license databases.
 - `report_formats`: `sarif` (default), `json`, `table`, `cyclonedx`,
   `spdx-json`, `github`, and `human` (an alias for `table`)
 - `scan_mode: changed` is a no-op unless the calling event touched a
-  dependency manifest, IaC or container file, and otherwise scans all of
-  `scan_path`: trivy needs the whole subtree to resolve transitive
-  dependencies and cross-file IaC references, so unlike bandit and zizmor
-  it is never handed an individual file list.
+  dependency manifest, IaC or container file. Those files are what trivy
+  scans. It accepts a single path, so each one is scanned on its own and
+  the reports are merged. A missing diff range, or a change to trivy's
+  config or ignore file, scans all of `scan_path`.
 - Fails on findings at or above HIGH severity; reports still carry every
   finding. Runs trivy's `misconfig`, `vuln` and `license` scanners;
   `secret` is deliberately left out because gitleaks already covers

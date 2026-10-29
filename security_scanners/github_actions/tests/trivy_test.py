@@ -123,6 +123,25 @@ class MainTest(unittest.TestCase):
             run_trivy.call_args.kwargs["scanners"],
             ["misconfig", "vuln", "license"],
         )
+        self.assertIsNone(run_trivy.call_args.kwargs["files"])
+
+    def test_changed_mode_hands_trivy_the_audited_files(self):
+        audited = [Path("modules/vpc/main.tf")]
+        with (
+            mock.patch("trivy.gha_load_github_event", return_value={}),
+            mock.patch("trivy.gha_append_step_summary"),
+            mock.patch("trivy.gha_set_output"),
+            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+            mock.patch("trivy._determine_changed_audited_files", return_value=audited),
+            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+            mock.patch(
+                "trivy._run_trivy",
+                return_value={sev: 0 for sev in _SEVERITY_ORDER},
+            ) as run_trivy,
+        ):
+            rc = main(["--scan-mode", "changed", "--source-dir", "."])
+        self.assertEqual(rc, 0)
+        self.assertEqual(run_trivy.call_args.kwargs["files"], audited)
 
 
 class SeverityGateTest(unittest.TestCase):
@@ -655,6 +674,101 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
 
     def test_no_ignorefile_flag_when_the_target_ships_none(self):
         self.assertNotIn("--ignorefile", self._run(None))
+
+
+class RunTrivyChangedFilesTest(unittest.TestCase):
+    """Changed mode passes each audited file to `trivy fs`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self._main_tf = self._root / "modules" / "vpc" / "main.tf"
+        self._variables_tf = self._root / "modules" / "vpc" / "variables.tf"
+        self._main_tf.parent.mkdir(parents=True)
+        self._main_tf.write_text('variable "x" {}\n', encoding="utf-8")
+        self._variables_tf.write_text('variable "y" {}\n', encoding="utf-8")
+
+    def _fake_run(self, commands: list[tuple[list[str], Path | None]]):
+        def fake_run(cmd, **kwargs):
+            commands.append((cmd, kwargs.get("cwd")))
+            output = Path(cmd[cmd.index("--output") + 1])
+            if cmd[1] == "fs":
+                output.write_text(
+                    json.dumps(
+                        {
+                            "SchemaVersion": 2,
+                            "Results": [
+                                {
+                                    "Target": cmd[-1],
+                                    "Vulnerabilities": [{"Severity": "HIGH"}],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                output.write_text("converted\n", encoding="utf-8")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        return fake_run
+
+    def test_each_changed_file_is_scanned_from_the_scan_root(self):
+        # trivy fs takes one path. The path is relative to the scan root
+        # and the process runs there, so the report Target is the
+        # repository path (modules/vpc/main.tf) rather than the checkout
+        # prefix the workflow uses (.scan-target/...).
+        commands: list[tuple[list[str], Path | None]] = []
+        report = self._root / "trivy-report.json"
+        table = self._root / "trivy-report.txt"
+        with mock.patch("trivy.subprocess.run", side_effect=self._fake_run(commands)):
+            counts = _run_trivy(
+                Path("trivy"),
+                [
+                    _ReportTarget(fmt="json", path=report),
+                    _ReportTarget(fmt="table", path=table),
+                ],
+                config_path="trivy.yaml",
+                scanners=["misconfig", "vuln"],
+                scan_path=self._root,
+                files=[self._main_tf, self._variables_tf],
+            )
+        fs_cmds = [(cmd, cwd) for cmd, cwd in commands if cmd[1] == "fs"]
+        self.assertEqual(
+            [cmd[-1] for cmd, _cwd in fs_cmds],
+            ["modules/vpc/main.tf", "modules/vpc/variables.tf"],
+        )
+        self.assertEqual([cwd for _cmd, cwd in fs_cmds], [self._root, self._root])
+        convert_cmds = [cmd for cmd, _cwd in commands if cmd[1] == "convert"]
+        self.assertEqual(len(convert_cmds), 1)
+        self.assertEqual(
+            convert_cmds[0][convert_cmds[0].index("--format") + 1], "table"
+        )
+        self.assertEqual(table.read_text(encoding="utf-8"), "converted\n")
+        targets = [
+            result["Target"]
+            for result in json.loads(report.read_text(encoding="utf-8"))["Results"]
+        ]
+        self.assertEqual(targets, ["modules/vpc/main.tf", "modules/vpc/variables.tf"])
+        self.assertEqual(counts["HIGH"], 2)
+
+    def test_a_directory_scan_still_targets_the_scan_path(self):
+        commands: list[tuple[list[str], Path | None]] = []
+        report = self._root / "trivy-report.json"
+        with mock.patch("trivy.subprocess.run", side_effect=self._fake_run(commands)):
+            _run_trivy(
+                Path("trivy"),
+                [_ReportTarget(fmt="json", path=report)],
+                config_path="trivy.yaml",
+                scanners=["vuln"],
+                scan_path=self._root,
+            )
+        cmd, cwd = commands[0]
+        self.assertEqual(cmd[1], "fs")
+        self.assertEqual(cmd[-1], str(self._root))
+        self.assertIsNone(cwd)
+        self.assertNotIn("convert", [item[0][1] for item in commands])
 
 
 class IgnoreFileLocationTest(unittest.TestCase):
