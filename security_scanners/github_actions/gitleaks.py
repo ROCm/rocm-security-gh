@@ -89,6 +89,9 @@ _LEAK_SECURITY_SEVERITY_HIGH = "8.5"
 
 # Null SHA-1 git uses for "no previous commit" (a newly created ref).
 Z40 = "0" * 40
+# Successive `git fetch --deepen` amounts tried, in commits, before
+# falling back to fetching the full history of the PR's base and head.
+_DEEPEN_STEPS: tuple[int, ...] = (64, 256, 1024, 4096)
 
 
 class _PullRequestRef(TypedDict):
@@ -213,6 +216,88 @@ def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     )
 
 
+def _git(source_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=source_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _shallow_commits_in_range(source_dir: Path, rev_range: str) -> set[str]:
+    """Return the commits of `rev_range` that are shallow-clone boundaries.
+
+    Raises :class:`RuntimeError` when git cannot list the range.
+    """
+    shallow_path = _git(
+        source_dir, "rev-parse", "--path-format=absolute", "--git-path", "shallow"
+    )
+    if shallow_path.returncode != 0:
+        raise RuntimeError(
+            f"git rev-parse --git-path shallow failed: {shallow_path.stderr.strip()}"
+        )
+    shallow_file = Path(shallow_path.stdout.strip())
+    if not shallow_file.is_file():
+        return set()
+    boundaries = set(shallow_file.read_text(encoding="utf-8").split())
+
+    rev_list = _git(source_dir, "rev-list", rev_range)
+    if rev_list.returncode != 0:
+        raise RuntimeError(
+            f"git rev-list {rev_range} failed: {rev_list.stderr.strip()}"
+        )
+    return boundaries.intersection(rev_list.stdout.split())
+
+
+def _missing_range_history(source_dir: Path, base_sha: str, head_sha: str) -> str:
+    """Say why the clone cannot scope `base_sha..head_sha`, or return ''."""
+    if _git(source_dir, "merge-base", base_sha, head_sha).returncode != 0:
+        return "no common ancestor of the PR base and head is in the clone"
+    boundaries = _shallow_commits_in_range(source_dir, f"{base_sha}..{head_sha}")
+    if boundaries:
+        return (
+            f"commit(s) {', '.join(sorted(boundaries))} in the range have "
+            "parents missing from the clone"
+        )
+    return ""
+
+
+def _deepen_until_range_is_complete(
+    source_dir: Path, base_sha: str, head_sha: str
+) -> None:
+    """Fetch history until `base_sha..head_sha` holds only the PR's commits."""
+    fetches = [[f"--deepen={step}"] for step in _DEEPEN_STEPS] + [["--unshallow"]]
+    for fetch_args in fetches:
+        reason = _missing_range_history(source_dir, base_sha, head_sha)
+        if not reason:
+            return
+        log.info(
+            "Range %s..%s is incomplete (%s); fetching more history (%s)",
+            base_sha,
+            head_sha,
+            reason,
+            " ".join(fetch_args),
+        )
+        fetch = _git(
+            source_dir, "fetch", "--no-tags", *fetch_args, "origin", base_sha, head_sha
+        )
+        if fetch.returncode != 0:
+            log.warning(
+                "git fetch %s exited %d: %s",
+                " ".join(fetch_args),
+                fetch.returncode,
+                fetch.stderr.strip() or "(no stderr)",
+            )
+    reason = _missing_range_history(source_dir, base_sha, head_sha)
+    if reason:
+        raise RuntimeError(
+            f"Cannot scope the scan to {base_sha}..{head_sha} after fetching "
+            f"the full history of the PR base and head: {reason}."
+        )
+
+
 def _determine_log_opts(
     scan_mode: str,
     event_name: str,
@@ -273,6 +358,7 @@ def _determine_log_opts(
                 "Increase the checkout `fetch-depth` or ensure the base ref "
                 "is fetchable."
             )
+        _deepen_until_range_is_complete(source_dir, base_sha, head_sha)
         return f"{base_sha}..{head_sha}"
 
     if event_name == "push":
