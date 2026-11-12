@@ -89,8 +89,8 @@ which one won:
 | gitleaks | `gitleaks.toml`, `.gitleaks.toml`, plus `.gitleaksignore`                | `.github/scan_tools_configs/gitleaks.toml` |
 | zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
 | bandit   | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
-| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore.yaml` / `.trivyignore`     | `.github/scan_tools_configs/trivy.yml`     |
-| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults                            |
+| trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `.github/scan_tools_configs/trivy.yml`     |
+| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults, no `actions/unpinned-tag` |
 
 Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
@@ -117,7 +117,8 @@ path traversal or symlink outside the checkout fails the scan instead of
 silently selecting a default. Omitting a script-backed scanner's input
 preserves the conventional-location discovery and fallback in the table
 above. CodeQL config is intentionally explicit; omitting
-`codeql_config_path` leaves the CodeQL action on its defaults.
+`codeql_config_path` leaves CodeQL on the baseline's defaults, described under
+[CodeQL](#codeql).
 
 #### Ignoring findings
 
@@ -281,6 +282,15 @@ dangerous sink several functions away from where it entered.
 - `codeql_config_path` passes a config file from the scanned repository to
   CodeQL. Unlike `scan_mode`, its `paths` and `paths-ignore` settings control
   which source files CodeQL puts in its database.
+- Without `codeql_config_path`, CodeQL runs `security-extended` minus the
+  `actions/unpinned-tag` query. zizmor's `unpinned-uses` audit reports the
+  same references and can scope an exception to one repository
+  (`ROCm/TheRock/*: ref-pin` in the zizmor config), which CodeQL's query
+  cannot: it trusts a whole owner or nothing. A repository that passes its
+  own `codeql_config_path` gets exactly that config, so it excludes the
+  query itself with
+  `query-filters: [{exclude: {id: actions/unpinned-tag}}]` if it wants the
+  same behavior.
 - Private repositories skip CodeQL by baseline policy, even when GitHub Code
   Security is licensed there. The planning and `complete` jobs still succeed
   and report that CodeQL was intentionally disabled; the other scanners
