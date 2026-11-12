@@ -23,6 +23,7 @@ from gitleaks import (
     _parse_report_formats,
     _resolve_config_path,
     _run_gitleaks,
+    _shallow_commits_in_range,
     get_gitleaks_binary,
     main,
 )
@@ -345,7 +346,10 @@ class DetermineLogOptsTest(unittest.TestCase):
 
     def test_pull_request_returns_sha_range_without_no_merges(self):
         event = {"pull_request": {"base": {"sha": "aaa"}, "head": {"sha": "bbb"}}}
-        with mock.patch("gitleaks.subprocess.run") as run:
+        with (
+            mock.patch("gitleaks.subprocess.run") as run,
+            mock.patch("gitleaks._deepen_until_range_is_complete") as deepen,
+        ):
             # `_determine_log_opts` does a best-effort fetch and then
             # verifies the base commit is reachable with `rev-parse`.
             run.side_effect = [
@@ -353,6 +357,7 @@ class DetermineLogOptsTest(unittest.TestCase):
                 mock.Mock(returncode=0, stderr=""),
             ]
             log_opts = _determine_log_opts("changed", "pull_request", event)
+        deepen.assert_called_once_with(Path("."), "aaa", "bbb")
         self.assertEqual(log_opts, "aaa..bbb")
         self.assertNotIn("--no-merges", log_opts)
 
@@ -393,6 +398,200 @@ class DetermineLogOptsTest(unittest.TestCase):
     def test_push_malformed_payload_raises_key_error(self):
         with self.assertRaises(KeyError):
             _determine_log_opts("changed", "push", {})
+
+
+class ShallowPullRequestRangeTest(unittest.TestCase):
+    """`_determine_log_opts` on a shallow clone of a PR behind its base.
+
+    Mirrors what `actions/checkout` produces for a `pull_request` event:
+    the PR's merge ref fetched `commits + 2` deep. The PR forked from
+    `fork_point`, and the base branch has moved on since, so at that
+    depth the clone cannot see that `fork_point` is on the base branch.
+    """
+
+    _BASE_COMMITS_AFTER_FORK = 5
+    _OLD_SECRET = (
+        "https://hooks.slack.com/services/T00000000/B00000000/"
+        "oldfixtureoldfixtureoldfix"
+    )
+    _PR_SECRET = (
+        "https://hooks.slack.com/services/T11111111/B11111111/"
+        "prfixtureprfixtureprfixture"
+    )
+
+    def setUp(self):
+        self._upstream = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._upstream, ignore_errors=True)
+        self._clone = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self._clone, ignore_errors=True)
+
+        self._git(self._upstream, "init", "-q", "-b", "develop")
+        self._git(self._upstream, "config", "uploadpack.allowAnySHA1InWant", "true")
+        (self._upstream / "old-secret.env").write_text(
+            f"SLACK_WEBHOOK_URL={self._OLD_SECRET}\n", encoding="utf-8"
+        )
+        self._git(self._upstream, "add", "-A")
+        self._git(self._upstream, "commit", "-q", "-m", "old secret fixture")
+        for i in range(3):
+            self._commit(self._upstream, f"history-{i}")
+        self.fork_point = self._rev(self._upstream, "HEAD")
+
+        self._git(self._upstream, "checkout", "-q", "-b", "pr")
+        self._commit(self._upstream, "pr-change")
+        self.head_sha = self._rev(self._upstream, "HEAD")
+
+        self._git(self._upstream, "checkout", "-q", "develop")
+        for i in range(self._BASE_COMMITS_AFTER_FORK):
+            self._commit(self._upstream, f"develop-{i}")
+        self.base_sha = self._rev(self._upstream, "HEAD")
+
+        self._git(self._upstream, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+        merge_sha = self._rev(self._upstream, "HEAD")
+        self._git(self._upstream, "reset", "-q", "--hard", self.base_sha)
+
+        self._git(self._clone, "init", "-q")
+        self._git(self._clone, "remote", "add", "origin", self._upstream.as_uri())
+        # One PR commit, so `compute_pr_depth` would pick a depth of 3.
+        self._git(
+            self._clone, "fetch", "-q", "--no-tags", "--depth=3", "origin", merge_sha
+        )
+        self._git(self._clone, "checkout", "-q", merge_sha)
+
+        self.event = {
+            "pull_request": {
+                "base": {"sha": self.base_sha},
+                "head": {"sha": self.head_sha},
+            }
+        }
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _commit(self, repo: Path, name: str) -> None:
+        (repo / f"{name}.txt").write_text(name, encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-q", "-m", name)
+
+    def _rev(self, repo: Path, rev: str) -> str:
+        return self._git(repo, "rev-parse", rev)
+
+    def _range_commits(self, log_opts: str) -> list[str]:
+        return self._git(self._clone, "rev-list", log_opts).split()
+
+    def _run_real_gitleaks(self, log_opts: str) -> tuple[bool, list[dict[str, object]]]:
+        try:
+            binary = get_gitleaks_binary()
+        except Exception as exc:  # environment-dependent: no/blocked network, etc.
+            self.skipTest(f"gitleaks binary unavailable: {exc}")
+
+        reports_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, reports_dir, ignore_errors=True)
+        report = reports_dir / "gitleaks-report.json"
+        leaks_found = _run_gitleaks(
+            binary,
+            [_ReportTarget(fmt="json", path=report)],
+            config_path=_resolve_config_path(self._clone),
+            log_opts=log_opts,
+            source_dir=self._clone,
+            checkout_root=self._clone,
+        )
+        payload: object = json.loads(report.read_text(encoding="utf-8"))
+        self.assertIsInstance(payload, list)
+        findings: list[dict[str, object]] = []
+        for finding in payload:
+            self.assertIsInstance(finding, dict)
+            findings.append(finding)
+        return leaks_found, findings
+
+    def test_the_fixture_reproduces_a_boundary_in_the_range(self):
+        self._git(
+            self._clone,
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--depth=1",
+            "origin",
+            self.base_sha,
+        )
+        boundaries = _shallow_commits_in_range(
+            self._clone, f"{self.base_sha}..{self.head_sha}"
+        )
+        self.assertEqual(boundaries, {self.fork_point})
+
+    def test_range_holds_only_the_pr_commits(self):
+        log_opts = _determine_log_opts(
+            "changed", "pull_request", self.event, source_dir=self._clone
+        )
+        self.assertEqual(log_opts, f"{self.base_sha}..{self.head_sha}")
+        self.assertEqual(self._range_commits(log_opts), [self.head_sha])
+
+    def test_falls_back_to_full_history_when_deepening_is_not_enough(self):
+        with mock.patch("gitleaks._DEEPEN_STEPS", (1,)):
+            log_opts = _determine_log_opts(
+                "changed", "pull_request", self.event, source_dir=self._clone
+            )
+        self.assertEqual(self._range_commits(log_opts), [self.head_sha])
+        self.assertEqual(
+            self._git(self._clone, "rev-parse", "--is-shallow-repository"), "false"
+        )
+
+    def test_subdirectory_source_dir_is_supported(self):
+        subdir = self._clone / "nested"
+        subdir.mkdir()
+        log_opts = _determine_log_opts(
+            "changed", "pull_request", self.event, source_dir=subdir
+        )
+        self.assertEqual(self._range_commits(log_opts), [self.head_sha])
+
+    def test_secret_before_merge_base_is_not_reported(self):
+        log_opts = _determine_log_opts(
+            "changed", "pull_request", self.event, source_dir=self._clone
+        )
+        leaks_found, findings = self._run_real_gitleaks(log_opts)
+        self.assertFalse(leaks_found)
+        self.assertEqual(findings, [])
+
+    def test_secret_introduced_by_pr_is_reported(self):
+        self._git(self._upstream, "checkout", "-q", "pr")
+        (self._upstream / "pr-secret.env").write_text(
+            f"SLACK_WEBHOOK_URL={self._PR_SECRET}\n", encoding="utf-8"
+        )
+        self._git(self._upstream, "add", "-A")
+        self._git(self._upstream, "commit", "-q", "-m", "PR secret fixture")
+        head_sha = self._rev(self._upstream, "HEAD")
+        self._git(
+            self._clone,
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--depth=1",
+            "origin",
+            head_sha,
+        )
+        event = {
+            "pull_request": {
+                "base": {"sha": self.base_sha},
+                "head": {"sha": head_sha},
+            }
+        }
+
+        log_opts = _determine_log_opts(
+            "changed", "pull_request", event, source_dir=self._clone
+        )
+        leaks_found, findings = self._run_real_gitleaks(log_opts)
+        self.assertTrue(leaks_found)
+        self.assertGreaterEqual(len(findings), 1)
+        self.assertEqual({finding.get("Commit") for finding in findings}, {head_sha})
+        self.assertEqual(
+            {finding.get("File") for finding in findings}, {"pr-secret.env"}
+        )
 
 
 class EnrichSarifTest(unittest.TestCase):
