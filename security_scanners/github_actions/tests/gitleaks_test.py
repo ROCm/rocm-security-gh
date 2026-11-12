@@ -427,6 +427,7 @@ class ShallowPullRequestRangeTest(unittest.TestCase):
 
         self._git(self._upstream, "init", "-q", "-b", "develop")
         self._git(self._upstream, "config", "uploadpack.allowAnySHA1InWant", "true")
+        # codeql[py/clear-text-storage-sensitive-data]: fixture webhook written into a throwaway repo
         (self._upstream / "old-secret.env").write_text(
             f"SLACK_WEBHOOK_URL={self._OLD_SECRET}\n", encoding="utf-8"
         )
