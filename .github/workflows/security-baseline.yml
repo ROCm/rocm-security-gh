@@ -15,8 +15,9 @@ on:
         description: >-
           'changed' (default) restricts each scanner to what the calling
           event touched -- commits for gitleaks, changed workflow files
-          for zizmor, changed manifests and IaC files for trivy -- and
-          requires a pull_request or push payload.
+          for zizmor, findings in changed manifests and IaC files and
+          their directories for trivy -- and requires a pull_request or
+          push payload.
           'all' scans everything in 'scan_path' and is required for
           schedule, workflow_dispatch and release events.
         required: false

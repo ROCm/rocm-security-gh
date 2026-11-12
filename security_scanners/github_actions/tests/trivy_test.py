@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 from trivy import (
     _CONFIG_PATH,
+    _ChangedScope,
     _DEFAULT_SCANNERS,
     _ReportTarget,
     _SEVERITY_ORDER,
@@ -123,25 +124,81 @@ class MainTest(unittest.TestCase):
             run_trivy.call_args.kwargs["scanners"],
             ["misconfig", "vuln", "license"],
         )
-        self.assertIsNone(run_trivy.call_args.kwargs["files"])
+        self.assertIsNone(run_trivy.call_args.kwargs["scope"])
 
-    def test_changed_mode_hands_trivy_the_audited_files(self):
-        audited = [Path("modules/vpc/main.tf")]
-        with (
-            mock.patch("trivy.gha_load_github_event", return_value={}),
-            mock.patch("trivy.gha_append_step_summary"),
-            mock.patch("trivy.gha_set_output"),
-            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
-            mock.patch("trivy._determine_changed_audited_files", return_value=audited),
-            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
-            mock.patch(
-                "trivy._run_trivy",
-                return_value={sev: 0 for sev in _SEVERITY_ORDER},
-            ) as run_trivy,
-        ):
-            rc = main(["--scan-mode", "changed", "--source-dir", "."])
+    def test_changed_mode_gates_on_the_changed_files_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "project"
+            manifest = source_dir / "web" / "package.json"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}\n", encoding="utf-8")
+            with (
+                mock.patch("trivy.gha_load_github_event", return_value={}),
+                mock.patch("trivy.gha_append_step_summary"),
+                mock.patch("trivy.gha_set_output"),
+                mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+                mock.patch(
+                    "trivy._determine_changed_audited_files",
+                    return_value=[manifest],
+                ),
+                mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+                mock.patch(
+                    "trivy._run_trivy",
+                    return_value={sev: 0 for sev in _SEVERITY_ORDER},
+                ) as run_trivy,
+            ):
+                rc = main(["--scan-mode", "changed", "--source-dir", str(source_dir)])
         self.assertEqual(rc, 0)
-        self.assertEqual(run_trivy.call_args.kwargs["files"], audited)
+        kwargs = run_trivy.call_args.kwargs
+        self.assertEqual(kwargs["scan_path"], source_dir)
+        self.assertEqual(
+            kwargs["scope"],
+            _ChangedScope(
+                files=frozenset({"web/package.json"}),
+                directories=frozenset({"web"}),
+            ),
+        )
+
+
+class ChangedScopeTest(unittest.TestCase):
+    """Which report paths a 'changed' scan gates on."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _scope(self, *relpaths: str) -> _ChangedScope:
+        files = []
+        for relpath in relpaths:
+            path = self._root / relpath
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+            files.append(path)
+        return _ChangedScope.from_files(self._root, files)
+
+    def test_paths_are_relative_to_the_scan_root(self):
+        scope = self._scope("modules/vpc/variables.tf", "Dockerfile")
+        self.assertEqual(
+            scope.files, frozenset({"modules/vpc/variables.tf", "Dockerfile"})
+        )
+        self.assertEqual(scope.directories, frozenset({"modules/vpc", ""}))
+
+    def test_contains_the_changed_files_and_their_siblings(self):
+        scope = self._scope("web/package.json")
+        self.assertTrue(scope.contains("web/package.json"))
+        self.assertTrue(scope.contains("web/package-lock.json"))
+
+    def test_excludes_other_and_nested_directories(self):
+        scope = self._scope("web/package.json")
+        self.assertFalse(scope.contains("api/package-lock.json"))
+        self.assertFalse(scope.contains("web/vendor/package-lock.json"))
+        self.assertFalse(scope.contains("package-lock.json"))
+
+    def test_a_top_level_change_covers_only_top_level_files(self):
+        scope = self._scope("go.mod")
+        self.assertTrue(scope.contains("go.sum"))
+        self.assertFalse(scope.contains("cmd/go.sum"))
 
 
 class SeverityGateTest(unittest.TestCase):
@@ -625,6 +682,98 @@ class TallyFindingsBySeverityTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _tally_findings_by_severity(path)
 
+    def test_a_scope_counts_findings_by_result_target(self):
+        path = self._write_json(
+            {
+                "Results": [
+                    {
+                        "Target": "web/package-lock.json",
+                        "Vulnerabilities": [{"Severity": "HIGH"}],
+                    },
+                    {
+                        "Target": "./modules/vpc/main.tf",
+                        "Misconfigurations": [{"Severity": "CRITICAL"}],
+                    },
+                    {
+                        "Target": "api/package-lock.json",
+                        "Vulnerabilities": [{"Severity": "HIGH"}],
+                    },
+                ]
+            }
+        )
+        scope = _ChangedScope(
+            files=frozenset({"web/package.json", "modules/vpc/variables.tf"}),
+            directories=frozenset({"web", "modules/vpc"}),
+        )
+        counts = _tally_findings_by_severity(path, scope)
+        self.assertEqual(counts["HIGH"], 1)
+        self.assertEqual(counts["CRITICAL"], 1)
+
+    def test_a_scope_prefers_a_findings_own_file_path(self):
+        # License findings name their file; loose-file license results
+        # use a label such as "Loose File License(s)" as their Target.
+        path = self._write_json(
+            {
+                "Results": [
+                    {
+                        "Target": "Loose File License(s)",
+                        "Licenses": [
+                            {"Severity": "HIGH", "FilePath": "web/LICENSE"},
+                            {"Severity": "HIGH", "FilePath": "api/LICENSE"},
+                        ],
+                    }
+                ]
+            }
+        )
+        scope = _ChangedScope(
+            files=frozenset({"web/package.json"}),
+            directories=frozenset({"web"}),
+        )
+        self.assertEqual(_tally_findings_by_severity(path, scope)["HIGH"], 1)
+
+
+class RunTrivyScopeTest(unittest.TestCase):
+    """A scoped run reports every finding but gates on the scope."""
+
+    def test_reports_keep_findings_the_tally_leaves_out(self):
+        payload = {
+            "Results": [
+                {
+                    "Target": "web/package-lock.json",
+                    "Vulnerabilities": [{"Severity": "HIGH"}],
+                },
+                {
+                    "Target": "api/package-lock.json",
+                    "Vulnerabilities": [{"Severity": "HIGH"}],
+                },
+            ]
+        }
+
+        def fake_run(cmd, **kwargs):
+            output = Path(cmd[cmd.index("--output") + 1])
+            output.write_text(json.dumps(payload), encoding="utf-8")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "trivy-report.json"
+            with mock.patch("trivy.subprocess.run", side_effect=fake_run) as run:
+                counts = _run_trivy(
+                    Path("trivy"),
+                    [_ReportTarget(fmt="json", path=report)],
+                    config_path="trivy.yaml",
+                    scanners=["vuln"],
+                    scan_path=Path(tmp),
+                    scope=_ChangedScope(
+                        files=frozenset({"web/package.json"}),
+                        directories=frozenset({"web"}),
+                    ),
+                )
+            reported = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-1], tmp)
+        self.assertEqual(reported, payload)
+        self.assertEqual(counts["HIGH"], 1)
+
 
 class RunTrivyIgnoreFileTest(unittest.TestCase):
     """Tests that a scanned repository's Trivy ignore file is honoured."""
@@ -674,101 +823,6 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
 
     def test_no_ignorefile_flag_when_the_target_ships_none(self):
         self.assertNotIn("--ignorefile", self._run(None))
-
-
-class RunTrivyChangedFilesTest(unittest.TestCase):
-    """Changed mode passes each audited file to `trivy fs`."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._root = Path(self._tmp.name)
-        self.addCleanup(self._tmp.cleanup)
-        self._main_tf = self._root / "modules" / "vpc" / "main.tf"
-        self._variables_tf = self._root / "modules" / "vpc" / "variables.tf"
-        self._main_tf.parent.mkdir(parents=True)
-        self._main_tf.write_text('variable "x" {}\n', encoding="utf-8")
-        self._variables_tf.write_text('variable "y" {}\n', encoding="utf-8")
-
-    def _fake_run(self, commands: list[tuple[list[str], Path | None]]):
-        def fake_run(cmd, **kwargs):
-            commands.append((cmd, kwargs.get("cwd")))
-            output = Path(cmd[cmd.index("--output") + 1])
-            if cmd[1] == "fs":
-                output.write_text(
-                    json.dumps(
-                        {
-                            "SchemaVersion": 2,
-                            "Results": [
-                                {
-                                    "Target": cmd[-1],
-                                    "Vulnerabilities": [{"Severity": "HIGH"}],
-                                }
-                            ],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-            else:
-                output.write_text("converted\n", encoding="utf-8")
-            return mock.Mock(returncode=0, stdout="", stderr="")
-
-        return fake_run
-
-    def test_each_changed_file_is_scanned_from_the_scan_root(self):
-        # trivy fs takes one path. The path is relative to the scan root
-        # and the process runs there, so the report Target is the
-        # repository path (modules/vpc/main.tf) rather than the checkout
-        # prefix the workflow uses (.scan-target/...).
-        commands: list[tuple[list[str], Path | None]] = []
-        report = self._root / "trivy-report.json"
-        table = self._root / "trivy-report.txt"
-        with mock.patch("trivy.subprocess.run", side_effect=self._fake_run(commands)):
-            counts = _run_trivy(
-                Path("trivy"),
-                [
-                    _ReportTarget(fmt="json", path=report),
-                    _ReportTarget(fmt="table", path=table),
-                ],
-                config_path="trivy.yaml",
-                scanners=["misconfig", "vuln"],
-                scan_path=self._root,
-                files=[self._main_tf, self._variables_tf],
-            )
-        fs_cmds = [(cmd, cwd) for cmd, cwd in commands if cmd[1] == "fs"]
-        self.assertEqual(
-            [cmd[-1] for cmd, _cwd in fs_cmds],
-            ["modules/vpc/main.tf", "modules/vpc/variables.tf"],
-        )
-        self.assertEqual([cwd for _cmd, cwd in fs_cmds], [self._root, self._root])
-        convert_cmds = [cmd for cmd, _cwd in commands if cmd[1] == "convert"]
-        self.assertEqual(len(convert_cmds), 1)
-        self.assertEqual(
-            convert_cmds[0][convert_cmds[0].index("--format") + 1], "table"
-        )
-        self.assertEqual(table.read_text(encoding="utf-8"), "converted\n")
-        targets = [
-            result["Target"]
-            for result in json.loads(report.read_text(encoding="utf-8"))["Results"]
-        ]
-        self.assertEqual(targets, ["modules/vpc/main.tf", "modules/vpc/variables.tf"])
-        self.assertEqual(counts["HIGH"], 2)
-
-    def test_a_directory_scan_still_targets_the_scan_path(self):
-        commands: list[tuple[list[str], Path | None]] = []
-        report = self._root / "trivy-report.json"
-        with mock.patch("trivy.subprocess.run", side_effect=self._fake_run(commands)):
-            _run_trivy(
-                Path("trivy"),
-                [_ReportTarget(fmt="json", path=report)],
-                config_path="trivy.yaml",
-                scanners=["vuln"],
-                scan_path=self._root,
-            )
-        cmd, cwd = commands[0]
-        self.assertEqual(cmd[1], "fs")
-        self.assertEqual(cmd[-1], str(self._root))
-        self.assertIsNone(cwd)
-        self.assertNotIn("convert", [item[0][1] for item in commands])
 
 
 class IgnoreFileLocationTest(unittest.TestCase):
