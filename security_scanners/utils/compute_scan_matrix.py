@@ -6,8 +6,12 @@
 `SCANNERS` below is the org-wide policy: every scanner listed here runs
 against every repository that calls the workflow. There is deliberately no
 way for a caller to select a subset -- a repository must not be able to opt
-out of a scanner -- so this takes no input, and adding a scanner here rolls
-it out everywhere on the next run.
+out of a scanner -- and adding a scanner here rolls it out everywhere on
+the next run.
+
+The only targets a caller describes are Trivy's (see `trivy_targets`): a
+filesystem leg for the checkout and one leg per Docker image, each on its
+own runner so image builds run in parallel with the filesystem scan.
 
 Everything a matrix leg needs (the module to run, the runner, the timeout,
 and the name used for the check run, the SARIF category and the report
@@ -21,10 +25,22 @@ import sys
 from dataclasses import dataclass
 
 from security_scanners.utils.github_actions_api import gha_set_output
+from security_scanners.utils.trivy_targets import (
+    DEFAULT_SCAN_TYPES,
+    SCAN_TYPE_FILESYSTEM,
+    SCAN_TYPE_IMAGE,
+    TrivyPlan,
+    TrivyTargetError,
+    plan_trivy,
+)
 
 # GitHub cancels a job on a hosted runner after 6 hours, so a larger
 # budget than this is one the runner will never honour.
 MAX_TIMEOUT_MINUTES = 360
+TRIVY_SCANNER = "trivy"
+# An image leg builds the image before scanning it, and ROCm images take
+# far longer to build than a filesystem scan takes to run.
+TRIVY_IMAGE_TIMEOUT_MINUTES = 90
 
 
 @dataclass(frozen=True)
@@ -73,26 +89,61 @@ SCANNERS: tuple[ScannerSpec, ...] = (
         timeout_minutes=20,
     ),
     ScannerSpec(
-        name="trivy",
+        name=TRIVY_SCANNER,
         module="security_scanners.github_actions.trivy",
         timeout_minutes=20,
     ),
 )
 
 
-def build_matrix(specs: tuple[ScannerSpec, ...], timeout_minutes: int = 0) -> str:
-    """Render specs as the JSON `strategy.matrix.include` list."""
-    return json.dumps(
-        [
+def _entry(spec: ScannerSpec, name: str, timeout_minutes: int) -> dict[str, object]:
+    return {
+        "name": name,
+        "scanner": spec.name,
+        "module": spec.module,
+        "timeout_minutes": timeout_minutes,
+        "runner": spec.runner,
+    }
+
+
+def _trivy_entries(
+    spec: ScannerSpec, trivy: TrivyPlan, timeout_minutes: int
+) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    if trivy.filesystem:
+        entries.append(
             {
-                "scanner": spec.name,
-                "module": spec.module,
-                "timeout_minutes": spec.budget(timeout_minutes),
-                "runner": spec.runner,
+                **_entry(spec, spec.name, spec.budget(timeout_minutes)),
+                "trivy_scan_type": SCAN_TYPE_FILESYSTEM,
             }
-            for spec in specs
-        ]
-    )
+        )
+    image_budget = max(TRIVY_IMAGE_TIMEOUT_MINUTES, timeout_minutes)
+    for target in trivy.images:
+        entries.append(
+            {
+                **_entry(spec, target.name, image_budget),
+                "trivy_scan_type": SCAN_TYPE_IMAGE,
+                "trivy_image": target.image,
+                "trivy_dockerfile": target.dockerfile,
+                "trivy_build_commands": target.build_commands,
+            }
+        )
+    return entries
+
+
+def build_matrix(
+    specs: tuple[ScannerSpec, ...],
+    timeout_minutes: int = 0,
+    trivy: TrivyPlan = TrivyPlan(),
+) -> str:
+    """Render specs as the JSON `strategy.matrix.include` list."""
+    entries: list[dict[str, object]] = []
+    for spec in specs:
+        if spec.name == TRIVY_SCANNER:
+            entries.extend(_trivy_entries(spec, trivy, timeout_minutes))
+        else:
+            entries.append(_entry(spec, spec.name, spec.budget(timeout_minutes)))
+    return json.dumps(entries)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,6 +160,20 @@ def build_parser() -> argparse.ArgumentParser:
             f"{MAX_TIMEOUT_MINUTES} (GitHub cancels the job there anyway)."
         ),
     )
+    parser.add_argument(
+        "--trivy-scan-type",
+        default=os.environ.get("SCANNER_TRIVY_SCAN_TYPE") or DEFAULT_SCAN_TYPES,
+        help=(
+            "Comma-separated Trivy targets: 'filesystem' (the default) "
+            "scans the checkout, 'image' builds and scans each entry of "
+            "--trivy-images on its own runner."
+        ),
+    )
+    parser.add_argument(
+        "--trivy-images",
+        default=os.environ.get("SCANNER_TRIVY_IMAGES", ""),
+        help="YAML list of images to build and scan; see trivy_targets.",
+    )
     return parser
 
 
@@ -122,8 +187,12 @@ def main(argv: list[str]) -> int:
             f"--timeout-minutes must be between 0 and {MAX_TIMEOUT_MINUTES}, "
             f"got {requested}"
         )
+    try:
+        trivy = plan_trivy(args.trivy_scan_type, args.trivy_images)
+    except TrivyTargetError as exc:
+        parser.error(str(exc))
 
-    matrix = build_matrix(SCANNERS, requested)
+    matrix = build_matrix(SCANNERS, requested, trivy)
     print(
         "Scanners: "
         + ", ".join(f"{spec.name} ({spec.budget(requested)}m)" for spec in SCANNERS)
@@ -138,6 +207,9 @@ def main(argv: list[str]) -> int:
                 f"{spec.name} (default {spec.timeout_minutes}m)" for spec in raised
             )
         )
+    print(f"Trivy filesystem scan: {'yes' if trivy.filesystem else 'no'}")
+    for target in trivy.images:
+        print(f"Trivy image leg {target.name}: {target.dockerfile} -> {target.image}")
     print(f"matrix = {matrix}")
     gha_set_output({"matrix": matrix})
     return 0

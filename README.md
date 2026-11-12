@@ -54,8 +54,8 @@ Inputs, all optional, describe the calling event, who reads the output,
 where repository-specific scanner configs live and how long the
 repository is willing to wait: `scan_mode`, `run_on_label_change`,
 `report_formats`, `scan_path`, `codeql_config_path`, the four
-script-backed scanners' `<scanner>_config_path` inputs and
-`timeout_minutes`. The input descriptions in the workflow file are the
+script-backed scanners' `<scanner>_config_path` inputs,
+`trivy_scan_type`, `trivy_images`, and `timeout_minutes`. The input descriptions in the workflow file are the
 authoritative reference.
 
 `timeout_minutes` is the one input that moves a scanner's own budget,
@@ -249,13 +249,61 @@ settings, and licenses Trivy classifies as risky -- matching against its
 own regularly updated vulnerability, policy and license databases.
 
 - Check run: `trivy`
+
 - `report_formats`: `sarif` (default), `json`, `table`, `cyclonedx`,
   `spdx-json`, `github`, and `human` (an alias for `table`)
+
 - `scan_mode: changed` is a no-op unless the calling event touched a
   dependency manifest, IaC or container file, and otherwise scans all of
   `scan_path`: trivy needs the whole subtree to resolve transitive
   dependencies and cross-file IaC references, so unlike bandit and zizmor
   it is never handed an individual file list.
+
+- `trivy_scan_type` selects Trivy's targets: `filesystem` (the default)
+  scans `scan_path`, `image` builds and scans each image listed in
+  `trivy_images`, and `filesystem,image` does both. Every image gets its
+  own runner and check run, `trivy-image-<name>`, so builds run in
+  parallel with the filesystem scan and with each other.
+
+- Each `trivy_images` entry needs a repository-relative `dockerfile`.
+  Optional fields: `name` (defaults to a slug of the Dockerfile path, and
+  only needs setting when two entries share a Dockerfile), `image` (the
+  local tag to build and scan, `security-scan/<name>:ci` by default) and
+  `build_commands`. Without `build_commands` the image is built with
+  `docker build --file <dockerfile> --tag <image> .` from the repository
+  root. With them, the commands run in bash from the repository root in
+  place of that build, with `SCANNER_TRIVY_IMAGE` and
+  `SCANNER_TRIVY_DOCKERFILE` set, and must leave `SCANNER_TRIVY_IMAGE`
+  in the local Docker image store.
+
+- With `scan_mode: changed`, an image is built and scanned only when the
+  calling event changed its Dockerfile or the Trivy config or ignore
+  file; `scan_mode: all` always builds and scans every image. A change
+  to other files the image copies in does not trigger a build on its
+  own. Image legs get a 90-minute budget, and `timeout_minutes` raises
+  it like any other.
+
+  ```yaml
+  jobs:
+    security:
+      uses: ROCm/rocm-security-gh/.github/workflows/security-baseline.yml@<full commit SHA>
+      with:
+        trivy_scan_type: filesystem,image
+        trivy_images: |
+          - dockerfile: docker/Dockerfile.ubuntu
+          - dockerfile: docker/Dockerfile.dev
+            name: rocm-dev
+            build_commands: |
+              ./tools/generate-docker-context.sh
+              docker build --build-arg ROCM_VERSION=7.1 \
+                --file "$SCANNER_TRIVY_DOCKERFILE" --tag "$SCANNER_TRIVY_IMAGE" .
+  ```
+
+- Building an image runs its Dockerfile's `RUN` steps and any
+  `build_commands`, which on a pull request are code from that pull
+  request, inside the Trivy image job. The filesystem scan and the other
+  scanners never execute the scanned repository's code.
+
 - Fails on findings at or above HIGH severity; reports still carry every
   finding. Runs trivy's `misconfig`, `vuln` and `license` scanners;
   `secret` is deliberately left out because gitleaks already covers

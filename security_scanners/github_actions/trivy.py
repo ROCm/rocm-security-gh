@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Run trivy against the current repository checkout.
+"""Run trivy against a repository filesystem or container image.
 
 - Download and SHA256-verify the pinned `trivy` release binary.
 - Require the baseline Trivy config (hard error if missing).
@@ -14,6 +14,13 @@
   scan the whole subtree or nothing). Run per requested format and
   emit SARIF/non-SARIF paths plus a severity tally.
 
+In image mode (`--scan-type image`) one invocation builds and scans one
+image: `--dockerfile` names its Dockerfile and `--image` the local tag.
+The image is built with `docker build` from the checkout root, or by
+`--build-commands` when given, which must produce `--image`. In 'changed'
+mode the build and scan run only when the calling event changed that
+Dockerfile or the Trivy config/ignore file.
+
 Default scanners are `misconfig,vuln,license`; `secret` is omitted
 because gitleaks already covers secret detection.
 
@@ -22,8 +29,9 @@ Exit codes:
 * `0` - clean run, or an empty changed-file set.
 * `1` - findings at/above `--severity-threshold`, or `--report-formats`
   / `--scanners` was empty/unknown.
-* `2` - input error: scan path missing, baseline config missing,
-  `GITHUB_EVENT_PATH` malformed, or trivy itself errored.
+* `2` - input error: scan path or Dockerfile missing, invalid image
+  reference, baseline config missing, `GITHUB_EVENT_PATH` malformed, the
+  image build failed, or trivy itself errored.
 
 Inputs come from CLI flags or matching `SCANNER_*` env vars set by
 `security-baseline.yml`. That prefix is shared by every scanner, so one
@@ -62,6 +70,13 @@ from security_scanners.utils.scanner_config import (
     resolve_ignore_file,
     resolve_scanner_config,
     scanner_config_paths,
+)
+from security_scanners.utils.trivy_targets import (
+    SCAN_TYPE_FILESYSTEM,
+    SCAN_TYPE_IMAGE,
+    SCAN_TYPES,
+    TrivyTargetError,
+    validate_image_reference,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -282,6 +297,87 @@ def _parse_scanners(raw: str) -> list[str]:
     return scanners
 
 
+def _resolve_dockerfile_path(checkout_root: Path, raw: str) -> Path:
+    """Resolve a Dockerfile path and keep it inside the checkout."""
+    dockerfile = raw.strip()
+    if not dockerfile:
+        raise ValueError("Dockerfile path is empty")
+
+    checkout = checkout_root.resolve()
+    path = Path(dockerfile)
+    if path.is_absolute():
+        raise ValueError("Dockerfile path must be relative to the checkout root")
+
+    resolved = (checkout / path).resolve()
+    try:
+        resolved.relative_to(checkout)
+    except ValueError as exc:
+        raise ValueError(
+            "Dockerfile path must remain inside the checkout root"
+        ) from exc
+    if not resolved.is_file():
+        raise ValueError(f"Dockerfile not found: {dockerfile}")
+    return resolved
+
+
+def _build_trivy_image(
+    *,
+    checkout_root: Path,
+    dockerfile: Path,
+    image: str,
+    build_commands: str = "",
+) -> None:
+    """Build the image the subsequent Trivy image scan inspects.
+
+    Without `build_commands`, runs `docker build` on `dockerfile` with the
+    checkout root as context. With them, runs the commands in bash from the
+    checkout root instead, with `SCANNER_TRIVY_IMAGE` and
+    `SCANNER_TRIVY_DOCKERFILE` (checkout-relative) in their environment.
+    Either way the image must exist locally afterwards.
+    """
+    if build_commands:
+        dockerfile_relpath = dockerfile.relative_to(checkout_root.resolve())
+        command = ["bash", "-euo", "pipefail", "-c", build_commands]
+        env: dict[str, str] | None = {
+            **os.environ,
+            "SCANNER_TRIVY_IMAGE": image,
+            "SCANNER_TRIVY_DOCKERFILE": dockerfile_relpath.as_posix(),
+        }
+        log.info("Running build commands for %s:\n%s", image, build_commands)
+    else:
+        command = [
+            "docker",
+            "build",
+            "--file",
+            str(dockerfile),
+            "--tag",
+            image,
+            ".",
+        ]
+        env = None
+        log.info("Running: %s", " ".join(command))
+    try:
+        subprocess.run(command, check=True, cwd=checkout_root, env=env)
+    except OSError as exc:
+        raise RuntimeError(f"image build failed to start: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"image build failed with exit code {exc.returncode}"
+        ) from exc
+
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            f"the image build did not produce a local image named {image}"
+        ) from exc
+
+
 def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     # The fallback is anchored on REPO_ROOT (this script's own checkout),
     # not the cwd: when this workflow is called from another repo, the cwd
@@ -390,6 +486,64 @@ def _determine_changed_audited_files(
     * `[paths…]` — at least one audited file changed; caller should run
       trivy against `scan_path` and log the trigger files.
     """
+    changed = _changed_paths(event_name, event, checkout_root, config_paths)
+    if changed is None:
+        return None
+
+    scan_root = scan_path.resolve()
+    files: list[Path] = []
+    for raw in changed:
+        relpath = raw.strip()
+        if not relpath or not _is_audited_path(relpath):
+            continue
+        # `relpath` is relative to the repo root (`checkout_root`), not
+        # to this process's cwd, so it must be re-anchored there before
+        # any further path operations.
+        candidate = checkout_root / relpath
+        try:
+            candidate.resolve().relative_to(scan_root)
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        files.append(candidate)
+    return files
+
+
+def _dockerfile_changed(
+    event_name: str,
+    event: Mapping[str, object],
+    dockerfile: Path,
+    checkout_root: Path = Path("."),
+    config_paths: tuple[str, ...] = _CONFIG_TRIGGERS,
+) -> bool:
+    """Return whether an image built from `dockerfile` needs a scan.
+
+    True when the calling event changed `dockerfile` (a resolved path) or
+    a Trivy config/ignore file, or when it has no usable diff range.
+    """
+    changed = _changed_paths(event_name, event, checkout_root, config_paths)
+    if changed is None:
+        return True
+    return any(
+        (checkout_root / relpath.strip()).resolve() == dockerfile
+        for relpath in changed
+        if relpath.strip()
+    )
+
+
+def _changed_paths(
+    event_name: str,
+    event: Mapping[str, object],
+    checkout_root: Path,
+    config_paths: tuple[str, ...],
+) -> list[str] | None:
+    """Return the repo-root-relative paths the calling event changed.
+
+    `None` means the caller must scan its whole scope: the event has no
+    usable diff range, `git diff` failed, or a Trivy config or ignore file
+    changed (which applies to every file).
+    """
     diff = _diff_range(event_name, event)
     if diff is None:
         return None
@@ -442,25 +596,7 @@ def _determine_changed_audited_files(
             config_change,
         )
         return None
-
-    scan_root = scan_path.resolve()
-    files: list[Path] = []
-    for raw in changed:
-        relpath = raw.strip()
-        if not relpath or not _is_audited_path(relpath):
-            continue
-        # `relpath` is relative to the repo root (`checkout_root`), not
-        # to this process's cwd, so it must be re-anchored there before
-        # any further path operations.
-        candidate = checkout_root / relpath
-        try:
-            candidate.resolve().relative_to(scan_root)
-        except ValueError:
-            continue
-        if not candidate.is_file():
-            continue
-        files.append(candidate)
-    return files
+    return changed
 
 
 def _run_trivy(
@@ -469,18 +605,36 @@ def _run_trivy(
     *,
     config_path: str,
     scanners: list[str],
-    scan_path: Path,
+    scan_path: Path | None = None,
     ignore_path: Path | None = None,
+    scan_type: str = SCAN_TYPE_FILESYSTEM,
+    image: str = "",
 ) -> dict[str, int]:
     """Run trivy for each user-requested format plus an internal JSON
     tally pass if the user didn't already request one, and return a
     severity tally.
     """
+    if scan_type == SCAN_TYPE_FILESYSTEM:
+        if scan_path is None:
+            raise RuntimeError("filesystem scan requires a scan path")
+        scan_command = ["fs", str(scan_path)]
+    elif scan_type == SCAN_TYPE_IMAGE:
+        try:
+            image_reference = validate_image_reference(image)
+        except TrivyTargetError as exc:
+            raise RuntimeError(f"invalid image reference: {exc}") from exc
+        scan_command = ["image", image_reference]
+    else:
+        raise RuntimeError(
+            f"unsupported Trivy scan type '{scan_type}' "
+            f"(expected one of: {', '.join(SCAN_TYPES)})"
+        )
+
     severity_csv = ",".join(_SEVERITY_ORDER)
     scanners_csv = ",".join(scanners)
     base_args: list[str] = [
         str(binary),
-        "fs",
+        *scan_command,
         "--severity",
         severity_csv,
         "--scanners",
@@ -517,7 +671,6 @@ def _run_trivy(
                 tgt.fmt,
                 "--output",
                 str(tgt.path),
-                str(scan_path),
             ]
             log.info("Running: %s", " ".join(cmd))
             try:
@@ -577,6 +730,39 @@ def _tally_findings_by_severity(json_path: Path) -> dict[str, int]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--scan-type",
+        default=os.environ.get("SCANNER_TRIVY_SCAN_TYPE") or SCAN_TYPE_FILESYSTEM,
+        choices=SCAN_TYPES,
+        help=(
+            "Trivy target type. 'filesystem' (the default) scans "
+            "--source-dir; 'image' builds --image from --dockerfile and "
+            "scans it."
+        ),
+    )
+    p.add_argument(
+        "--image",
+        default=os.environ.get("SCANNER_TRIVY_IMAGE", ""),
+        help="Local image reference to build and scan with --scan-type image.",
+    )
+    p.add_argument(
+        "--dockerfile",
+        default=os.environ.get("SCANNER_TRIVY_DOCKERFILE", ""),
+        help=(
+            "Dockerfile path relative to --checkout-root for --scan-type "
+            "image. In 'changed' mode the image is built and scanned only "
+            "when this file, or the Trivy config/ignore file, changed."
+        ),
+    )
+    p.add_argument(
+        "--build-commands",
+        default=os.environ.get("SCANNER_TRIVY_BUILD_COMMANDS", ""),
+        help=(
+            "Bash commands that build --image in place of `docker build "
+            "--file <dockerfile> --tag <image> .`, run from --checkout-root "
+            "with SCANNER_TRIVY_IMAGE and SCANNER_TRIVY_DOCKERFILE set."
+        ),
+    )
     p.add_argument(
         "--scan-mode",
         default=os.environ.get("SCANNER_SCAN_MODE", "changed"),
@@ -678,8 +864,29 @@ def main(argv: list[str]) -> int:
         log.error("%s", exc)
         return 1
 
+    image_mode = args.scan_type == SCAN_TYPE_IMAGE
+    build_commands = args.build_commands.strip()
+    try:
+        if image_mode:
+            image = validate_image_reference(args.image)
+            if not args.dockerfile.strip():
+                raise ValueError("--dockerfile is required when --scan-type is image")
+        else:
+            image = ""
+            image_only = {
+                "--image": args.image,
+                "--dockerfile": args.dockerfile,
+                "--build-commands": build_commands,
+            }
+            for flag, value in image_only.items():
+                if value.strip():
+                    raise ValueError(f"{flag} requires --scan-type image")
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 2
+
     source_dir = Path(args.source_dir)
-    if not source_dir.is_dir():
+    if not image_mode and not source_dir.is_dir():
         log.error(
             "scan path '%s' does not exist or is not a directory "
             "(did the checkout step fetch it?)",
@@ -708,13 +915,26 @@ def main(argv: list[str]) -> int:
             filenames=_IGNORE_FILENAMES,
             configured_path=args.config_path,
         )
+        dockerfile_path = (
+            _resolve_dockerfile_path(checkout_root, args.dockerfile)
+            if image_mode
+            else None
+        )
         # Only 'changed' mode needs the event payload, to work out the
         # diff range. Loading it unconditionally would make 'all' mode
         # fail on events that have no payload we can parse, even though
         # it never looks at one.
-        if args.scan_mode == "all":
-            files: list[Path] | None = None
-        else:
+        files: list[Path] | None = None
+        image_changed = True
+        if args.scan_mode == "changed" and dockerfile_path is not None:
+            image_changed = _dockerfile_changed(
+                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
+                event=gha_load_github_event(),
+                dockerfile=dockerfile_path,
+                checkout_root=checkout_root,
+                config_paths=config_paths,
+            )
+        elif args.scan_mode == "changed":
             files = _determine_changed_audited_files(
                 event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
                 event=gha_load_github_event(),
@@ -726,7 +946,16 @@ def main(argv: list[str]) -> int:
         log.error("%s", exc)
         return 2
 
-    if files is None:
+    nothing_to_scan = not image_changed or (files is not None and not files)
+    if image_mode and image_changed:
+        log.info("Trivy scope: Docker image %s built from %s", image, args.dockerfile)
+    elif image_mode:
+        log.info(
+            "Trivy scope: %s and the Trivy config are unchanged in the event; "
+            "nothing to build or scan",
+            args.dockerfile,
+        )
+    elif files is None:
         log.info(
             "Trivy scope: recursive scan of %s (no usable diff range)",
             source_dir,
@@ -761,11 +990,18 @@ def main(argv: list[str]) -> int:
     non_sarif = [t for t in targets if t.fmt != "sarif"]
 
     # 'changed' mode with nothing to scan: emit empty paths so uploads skip.
-    if files is not None and not files:
+    if nothing_to_scan:
         gha_set_output({"sarif_path": "", "non_sarif_paths": ""})
         return 0
 
     try:
+        if dockerfile_path is not None:
+            _build_trivy_image(
+                checkout_root=checkout_root,
+                dockerfile=dockerfile_path,
+                image=image,
+                build_commands=build_commands,
+            )
         binary = get_trivy_binary()
         counts = _run_trivy(
             binary,
@@ -774,6 +1010,8 @@ def main(argv: list[str]) -> int:
             scanners=scanners,
             scan_path=source_dir,
             ignore_path=ignore_path,
+            scan_type=args.scan_type,
+            image=image,
         )
         # Set outputs only after a successful run, gated on the report
         # actually existing on disk: the workflow's upload steps run with

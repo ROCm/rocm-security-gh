@@ -18,15 +18,19 @@ from trivy import (
     _SEVERITY_ORDER,
     _TRIVY_TARBALL_FILENAME,
     _TRIVY_VERSION,
+    _build_trivy_image,
     _determine_changed_audited_files,
     _diff_range,
+    _dockerfile_changed,
     _is_audited_path,
     _parse_report_formats,
     _parse_scanners,
     _resolve_config_path,
+    _resolve_dockerfile_path,
     _run_trivy,
     _tally_findings_by_severity,
     _trivy_subprocess_env,
+    build_parser,
     get_trivy_binary,
     main,
 )
@@ -123,6 +127,197 @@ class MainTest(unittest.TestCase):
             run_trivy.call_args.kwargs["scanners"],
             ["misconfig", "vuln", "license"],
         )
+
+    def _image_main(
+        self, scan_mode: str, *, dockerfile_changed: bool = True, extra=()
+    ) -> tuple[int, dict[str, mock.Mock]]:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "docker").mkdir()
+        (root / "docker" / "Dockerfile").write_text("FROM scratch\n", "utf-8")
+        counts = {sev: 0 for sev in _SEVERITY_ORDER}
+        with (
+            mock.patch("trivy.gha_append_step_summary"),
+            mock.patch("trivy.gha_set_output") as set_output,
+            mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
+            mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
+            mock.patch("trivy.gha_load_github_event", return_value={}) as load_event,
+            mock.patch(
+                "trivy._dockerfile_changed", return_value=dockerfile_changed
+            ) as changed,
+            mock.patch("trivy._build_trivy_image") as build_image,
+            mock.patch("trivy._run_trivy", return_value=counts) as run_trivy,
+        ):
+            rc = main(
+                [
+                    "--scan-type",
+                    "image",
+                    "--image",
+                    "security-scan/app:ci",
+                    "--dockerfile",
+                    "docker/Dockerfile",
+                    "--scan-mode",
+                    scan_mode,
+                    "--source-dir",
+                    "missing-checkout",
+                    "--checkout-root",
+                    str(root),
+                    *extra,
+                ]
+            )
+        mocks = {
+            "root": root,
+            "set_output": set_output,
+            "load_event": load_event,
+            "changed": changed,
+            "build_image": build_image,
+            "run_trivy": run_trivy,
+        }
+        return rc, mocks
+
+    def test_image_mode_all_builds_and_scans_without_an_event(self):
+        rc, mocks = self._image_main("all")
+
+        self.assertEqual(rc, 0)
+        mocks["load_event"].assert_not_called()
+        mocks["changed"].assert_not_called()
+        mocks["build_image"].assert_called_once_with(
+            checkout_root=mocks["root"],
+            dockerfile=(mocks["root"] / "docker" / "Dockerfile").resolve(),
+            image="security-scan/app:ci",
+            build_commands="",
+        )
+        run_kwargs = mocks["run_trivy"].call_args.kwargs
+        self.assertEqual(run_kwargs["scan_type"], "image")
+        self.assertEqual(run_kwargs["image"], "security-scan/app:ci")
+
+    def test_image_mode_changed_skips_an_unchanged_dockerfile(self):
+        rc, mocks = self._image_main("changed", dockerfile_changed=False)
+
+        self.assertEqual(rc, 0)
+        mocks["build_image"].assert_not_called()
+        mocks["run_trivy"].assert_not_called()
+        mocks["set_output"].assert_called_once_with(
+            {"sarif_path": "", "non_sarif_paths": ""}
+        )
+
+    def test_image_mode_changed_builds_a_changed_dockerfile(self):
+        rc, mocks = self._image_main("changed", dockerfile_changed=True)
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            mocks["changed"].call_args.kwargs["dockerfile"],
+            (mocks["root"] / "docker" / "Dockerfile").resolve(),
+        )
+        mocks["build_image"].assert_called_once()
+        mocks["run_trivy"].assert_called_once()
+
+    def test_image_mode_passes_build_commands_to_the_build(self):
+        rc, mocks = self._image_main(
+            "all", extra=("--build-commands", "  make image  \n")
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            mocks["build_image"].call_args.kwargs["build_commands"], "make image"
+        )
+
+    def test_image_mode_rejects_a_missing_dockerfile(self):
+        with mock.patch("trivy.get_trivy_binary") as get_binary:
+            rc = main(
+                [
+                    "--scan-type",
+                    "image",
+                    "--image",
+                    "security-scan:ci",
+                    "--dockerfile",
+                    "missing/Dockerfile",
+                    "--scan-mode",
+                    "all",
+                ]
+            )
+        self.assertEqual(rc, 2)
+        get_binary.assert_not_called()
+
+    def test_image_mode_rejects_an_image_that_looks_like_a_flag(self):
+        rc = main(
+            [
+                "--scan-type",
+                "image",
+                "--image=--output=/etc/passwd",
+                "--dockerfile",
+                "Dockerfile",
+            ]
+        )
+        self.assertEqual(rc, 2)
+
+    def test_image_mode_requires_an_image_reference(self):
+        with mock.patch("trivy.get_trivy_binary") as get_binary:
+            rc = main(["--scan-type", "image", "--source-dir", "missing-checkout"])
+
+        self.assertEqual(rc, 2)
+        get_binary.assert_not_called()
+
+    def test_image_mode_requires_a_dockerfile(self):
+        with mock.patch("trivy.get_trivy_binary") as get_binary:
+            rc = main(
+                [
+                    "--scan-type",
+                    "image",
+                    "--image",
+                    "security-scan:ci",
+                    "--source-dir",
+                    "missing-checkout",
+                ]
+            )
+
+        self.assertEqual(rc, 2)
+        get_binary.assert_not_called()
+
+    def test_filesystem_mode_rejects_an_image_reference(self):
+        rc = main(
+            [
+                "--scan-type",
+                "filesystem",
+                "--image",
+                "alpine:3.20",
+                "--source-dir",
+                ".",
+            ]
+        )
+        self.assertEqual(rc, 2)
+
+    def test_filesystem_mode_rejects_a_dockerfile(self):
+        rc = main(
+            [
+                "--scan-type",
+                "filesystem",
+                "--dockerfile",
+                "Dockerfile",
+                "--source-dir",
+                ".",
+            ]
+        )
+        self.assertEqual(rc, 2)
+
+    def test_filesystem_mode_rejects_build_commands(self):
+        rc = main(
+            [
+                "--scan-type",
+                "filesystem",
+                "--build-commands",
+                "make image",
+                "--source-dir",
+                ".",
+            ]
+        )
+        self.assertEqual(rc, 2)
+
+    def test_an_empty_scan_type_env_means_filesystem(self):
+        # Matrix legs other than Trivy's leave the variable empty.
+        with mock.patch.dict(os.environ, {"SCANNER_TRIVY_SCAN_TYPE": ""}):
+            self.assertEqual(build_parser().parse_args([]).scan_type, "filesystem")
 
 
 class SeverityGateTest(unittest.TestCase):
@@ -266,6 +461,176 @@ class ParseScannersTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             _parse_scanners("vuln,bogus")
         self.assertIn("'bogus'", str(ctx.exception))
+
+
+class ResolveDockerfilePathTest(unittest.TestCase):
+    """Tests for `_resolve_dockerfile_path`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name) / "checkout"
+        self._root.mkdir()
+        self.addCleanup(self._tmp.cleanup)
+        (self._root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    def test_resolves_a_file_inside_the_checkout(self):
+        self.assertEqual(
+            _resolve_dockerfile_path(self._root, "Dockerfile"),
+            (self._root / "Dockerfile").resolve(),
+        )
+
+    def test_rejects_a_dockerfile_outside_the_checkout(self):
+        (self._root.parent / "Dockerfile").write_text("FROM scratch\n", "utf-8")
+        with self.assertRaises(ValueError):
+            _resolve_dockerfile_path(self._root, "../Dockerfile")
+
+    def test_rejects_an_absolute_path(self):
+        with self.assertRaises(ValueError):
+            _resolve_dockerfile_path(self._root, str(self._root / "Dockerfile"))
+
+    def test_rejects_a_missing_dockerfile(self):
+        with self.assertRaises(ValueError):
+            _resolve_dockerfile_path(self._root, "missing/Dockerfile")
+
+
+class BuildTrivyImageTest(unittest.TestCase):
+    """Tests for building the image an image scan inspects."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        (self._root / "docker").mkdir()
+        self._dockerfile = (self._root / "docker" / "Dockerfile").resolve()
+        self._dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+
+    def test_default_build_runs_docker_build_from_the_checkout_root(self):
+        with mock.patch("trivy.subprocess.run") as run:
+            _build_trivy_image(
+                checkout_root=self._root,
+                dockerfile=self._dockerfile,
+                image="security-scan:ci",
+            )
+
+        self.assertEqual(
+            run.call_args_list[0],
+            mock.call(
+                [
+                    "docker",
+                    "build",
+                    "--file",
+                    str(self._dockerfile),
+                    "--tag",
+                    "security-scan:ci",
+                    ".",
+                ],
+                check=True,
+                cwd=self._root,
+                env=None,
+            ),
+        )
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            ["docker", "image", "inspect", "--format", "{{.Id}}", "security-scan:ci"],
+        )
+
+    def test_build_commands_replace_docker_build(self):
+        with mock.patch("trivy.subprocess.run") as run:
+            _build_trivy_image(
+                checkout_root=self._root,
+                dockerfile=self._dockerfile,
+                image="security-scan:ci",
+                build_commands="./build.sh",
+            )
+
+        build = run.call_args_list[0]
+        self.assertEqual(
+            build.args[0], ["bash", "-euo", "pipefail", "-c", "./build.sh"]
+        )
+        self.assertEqual(build.kwargs["cwd"], self._root)
+        self.assertEqual(build.kwargs["env"]["SCANNER_TRIVY_IMAGE"], "security-scan:ci")
+        self.assertEqual(
+            build.kwargs["env"]["SCANNER_TRIVY_DOCKERFILE"], "docker/Dockerfile"
+        )
+
+    def test_failed_build_raises(self):
+        with (
+            mock.patch(
+                "trivy.subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["docker"]),
+            ),
+            self.assertRaisesRegex(RuntimeError, "exit code 1"),
+        ):
+            _build_trivy_image(
+                checkout_root=self._root,
+                dockerfile=self._dockerfile,
+                image="security-scan:ci",
+            )
+
+    def test_build_that_produces_no_image_raises(self):
+        # Build commands are free-form, so a successful exit does not
+        # prove they tagged the image the scan is about to look for.
+        with (
+            mock.patch(
+                "trivy.subprocess.run",
+                side_effect=[
+                    mock.Mock(returncode=0),
+                    subprocess.CalledProcessError(1, ["docker", "image"]),
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "did not produce"),
+        ):
+            _build_trivy_image(
+                checkout_root=self._root,
+                dockerfile=self._dockerfile,
+                image="security-scan:ci",
+                build_commands="true",
+            )
+
+
+class DockerfileChangedTest(unittest.TestCase):
+    """Tests for `_dockerfile_changed`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        (self._root / "docker").mkdir()
+        self._dockerfile = (self._root / "docker" / "Dockerfile").resolve()
+        self._dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+
+    def _changed(self, diff_output: str, event_name: str = "push") -> bool:
+        with mock.patch("trivy.subprocess.run") as run:
+            run.side_effect = [
+                mock.Mock(returncode=0, stdout="", stderr=""),
+                mock.Mock(returncode=0, stdout=diff_output, stderr=""),
+            ]
+            return _dockerfile_changed(
+                event_name=event_name,
+                event={"before": "abc", "after": "def"},
+                dockerfile=self._dockerfile,
+                checkout_root=self._root,
+            )
+
+    def test_a_changed_dockerfile_needs_a_scan(self):
+        self.assertTrue(self._changed("README.md\ndocker/Dockerfile\n"))
+
+    def test_other_changes_do_not(self):
+        # Including another Dockerfile, which has its own image leg.
+        self.assertFalse(self._changed("README.md\nother/Dockerfile\n"))
+
+    def test_a_config_change_needs_a_scan(self):
+        self.assertTrue(self._changed(".trivyignore.yaml\n"))
+
+    def test_no_diff_range_needs_a_scan(self):
+        self.assertTrue(
+            _dockerfile_changed(
+                event_name="workflow_dispatch",
+                event={},
+                dockerfile=self._dockerfile,
+                checkout_root=self._root,
+            )
+        )
 
 
 class TrivySubprocessEnvTest(unittest.TestCase):
@@ -655,6 +1020,56 @@ class RunTrivyIgnoreFileTest(unittest.TestCase):
 
     def test_no_ignorefile_flag_when_the_target_ships_none(self):
         self.assertNotIn("--ignorefile", self._run(None))
+
+
+class RunTrivyImageTest(unittest.TestCase):
+    """Tests that image mode invokes Trivy's image scanner."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._tmp_root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_image_reference_is_a_trivy_image_target(self):
+        commands: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            commands.append(cmd)
+            output = Path(cmd[cmd.index("--output") + 1])
+            output.write_text('{"Results": []}', encoding="utf-8")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        target = _ReportTarget(fmt="json", path=self._tmp_root / "report.json")
+        image = "registry.example.com/team/app@sha256:" + "a" * 64
+        with mock.patch("trivy.subprocess.run", side_effect=fake_run):
+            _run_trivy(
+                Path("trivy"),
+                [target],
+                config_path="trivy.yaml",
+                scanners=["vuln"],
+                scan_type="image",
+                image=image,
+            )
+
+        self.assertEqual(commands[0][1:3], ["image", image])
+        self.assertNotIn("fs", commands[0])
+
+    def test_invalid_image_reference_fails_before_subprocess(self):
+        target = _ReportTarget(fmt="json", path=self._tmp_root / "report.json")
+        with (
+            mock.patch("trivy.subprocess.run") as run,
+            self.assertRaises(RuntimeError),
+        ):
+            _run_trivy(
+                Path("trivy"),
+                [target],
+                config_path="trivy.yaml",
+                scanners=["vuln"],
+                scan_type="image",
+                image="registry.example.com/team/app latest",
+            )
+
+        run.assert_not_called()
 
 
 class IgnoreFileLocationTest(unittest.TestCase):
