@@ -3,7 +3,10 @@
 #
 # trivy configuration
 # Reference: https://trivy.dev/latest/docs/references/configuration/config-file/
-# Local scan: trivy fs --config .github/scan_tools_configs/trivy.yml .
+# Local scans:
+#   trivy fs --config .github/scan_tools_configs/trivy.yml .
+#   docker build --file Dockerfile --tag security-scan:local .
+#   trivy image --config .github/scan_tools_configs/trivy.yml security-scan:local
 #
 # Trivy configuration for this repository's security scans.
 #

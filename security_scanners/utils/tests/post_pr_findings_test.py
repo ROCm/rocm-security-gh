@@ -291,6 +291,42 @@ class CollectionAndCoverageTest(unittest.TestCase):
         self.assertIn("CodeQL", reasons[1])
         self.assertIn("no usable", reasons[2])
 
+    def test_trivy_image_legs_are_collected_and_covered_separately(self):
+        api = FakeApi()
+        artifact_path = "/repos/ROCm/example/actions/runs/42/artifacts"
+        api.keyed[(artifact_path, "artifacts")] = [
+            {"id": 1, "name": "trivy-report", "expired": False},
+            {"id": 2, "name": "trivy-image-rocm-dev-report", "expired": False},
+            {"id": 3, "name": "trivy-image-Bad-report", "expired": False},
+        ]
+        report = json.dumps({"SchemaVersion": 2, "Results": []}).encode()
+        api.downloads["/repos/ROCm/example/actions/artifacts/1/zip"] = make_zip(
+            {"trivy-report.json": report}
+        )
+        api.downloads["/repos/ROCm/example/actions/artifacts/2/zip"] = make_zip(
+            {"trivy-report.json": report, "trivy-report.txt": b"table"}
+        )
+
+        collected = collect_findings(api, context())  # type: ignore[arg-type]
+
+        self.assertEqual(
+            collected.observed_scanners,
+            frozenset({"trivy", "trivy-image-rocm-dev"}),
+        )
+        self.assertEqual(collected.incomplete_reasons, ())
+
+        jobs_path = "/repos/ROCm/example/actions/runs/42/jobs"
+        api.keyed[(jobs_path, "jobs")] = [
+            {"name": "security / trivy-image-rocm-dev", "conclusion": "failure"},
+            {"name": "security / trivy-image-other", "conclusion": "failure"},
+        ]
+        reasons = job_coverage_reasons(
+            api, context(), collected.observed_scanners  # type: ignore[arg-type]
+        )
+        self.assertEqual(
+            reasons, ["security / trivy-image-other concluded with failure."]
+        )
+
 
 class RollupJobCoverageTest(unittest.TestCase):
     def test_failed_rollup_jobs_are_not_coverage_notes(self):

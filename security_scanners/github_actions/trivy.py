@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Run trivy against the current repository checkout.
+"""Run trivy against a repository filesystem or container image.
 
 - Download and SHA256-verify the pinned `trivy` release binary.
 - Require the baseline Trivy config (hard error if missing).
@@ -17,6 +17,14 @@
   changed audited file, or in a file in the same directory as one,
   count toward `--severity-threshold`; the reports keep every finding.
 
+In image mode (`--scan-type image`) one invocation builds and scans one
+image: `--dockerfile` names its Dockerfile and `--image` the local tag.
+The image is built with `docker build` from the checkout root, or by
+`--build-commands` when given, which must produce `--image`. In 'changed'
+mode the build and scan run only when the calling event changed one of
+the image's inputs or the Trivy config/ignore file. An image with
+`--build-commands` is skipped on pull requests from other repositories.
+
 Default scanners are `misconfig,vuln,license`; `secret` is omitted
 because gitleaks already covers secret detection.
 
@@ -25,8 +33,9 @@ Exit codes:
 * `0` - clean run, or an empty changed-file set.
 * `1` - findings at/above `--severity-threshold`, or `--report-formats`
   / `--scanners` was empty/unknown.
-* `2` - input error: scan path missing, baseline config missing,
-  `GITHUB_EVENT_PATH` malformed, or trivy itself errored.
+* `2` - input error: scan path or Dockerfile missing, invalid image
+  reference, baseline config missing, `GITHUB_EVENT_PATH` malformed, the
+  image build failed, or trivy itself errored.
 
 Inputs come from CLI flags or matching `SCANNER_*` env vars set by
 `security-baseline.yml`. That prefix is shared by every scanner, so one
@@ -43,6 +52,8 @@ import json
 import logging
 import os
 import posixpath
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -66,6 +77,13 @@ from security_scanners.utils.scanner_config import (
     resolve_ignore_file,
     resolve_scanner_config,
     scanner_config_paths,
+)
+from security_scanners.utils.trivy_targets import (
+    SCAN_TYPE_FILESYSTEM,
+    SCAN_TYPE_IMAGE,
+    SCAN_TYPES,
+    TrivyTargetError,
+    validate_image_reference,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -286,6 +304,80 @@ def _parse_scanners(raw: str) -> list[str]:
     return scanners
 
 
+def _resolve_dockerfile_path(checkout_root: Path, raw: str) -> Path:
+    """Resolve a Dockerfile path and keep it inside the checkout."""
+    dockerfile = raw.strip()
+    if not dockerfile:
+        raise ValueError("Dockerfile path is empty")
+
+    checkout = checkout_root.resolve()
+    path = Path(dockerfile)
+    if path.is_absolute():
+        raise ValueError("Dockerfile path must be relative to the checkout root")
+
+    resolved = (checkout / path).resolve()
+    try:
+        resolved.relative_to(checkout)
+    except ValueError as exc:
+        raise ValueError(
+            "Dockerfile path must remain inside the checkout root"
+        ) from exc
+    if not resolved.is_file():
+        raise ValueError(f"Dockerfile not found: {dockerfile}")
+    return resolved
+
+
+def _build_trivy_image(
+    *,
+    checkout_root: Path,
+    dockerfile: Path,
+    image: str,
+    build_commands: str = "",
+) -> None:
+    """Build `image` with `docker build`, or with `build_commands` instead."""
+    if build_commands:
+        dockerfile_relpath = dockerfile.relative_to(checkout_root.resolve())
+        command = ["bash", "-euo", "pipefail", "-c", build_commands]
+        env: dict[str, str] | None = {
+            **os.environ,
+            "SCANNER_TRIVY_IMAGE": image,
+            "SCANNER_TRIVY_DOCKERFILE": dockerfile_relpath.as_posix(),
+        }
+        log.info("Running build commands for %s:\n%s", image, build_commands)
+    else:
+        command = [
+            "docker",
+            "build",
+            "--file",
+            str(dockerfile),
+            "--tag",
+            image,
+            ".",
+        ]
+        env = None
+        log.info("Running: %s", " ".join(command))
+    try:
+        subprocess.run(command, check=True, cwd=checkout_root, env=env)
+    except OSError as exc:
+        raise RuntimeError(f"image build failed to start: {exc}") from exc
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"image build failed with exit code {exc.returncode}"
+        ) from exc
+
+    try:
+        subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            f"the image build did not produce a local image named {image}"
+        ) from exc
+
+
 def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     # The fallback is anchored on REPO_ROOT (this script's own checkout),
     # not the cwd: when this workflow is called from another repo, the cwd
@@ -302,14 +394,37 @@ def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     )
 
 
-def _event_str(event: Mapping[str, object], *keys: str) -> str:
-    """Return the nested string at `event[keys[0]][keys[1]]...`, or `""`."""
+_PULL_REQUEST_EVENTS = frozenset({"pull_request", "pull_request_target"})
+
+
+def _event_value(event: Mapping[str, object], *keys: str) -> object:
+    """Return the nested value at `event[keys[0]][keys[1]]...`, or `None`."""
     current: object = event
     for key in keys:
         if not isinstance(current, Mapping):
-            return ""
+            return None
         current = current.get(key)
-    return current if isinstance(current, str) else ""
+    return current
+
+
+def _event_str(event: Mapping[str, object], *keys: str) -> str:
+    """Return the nested string at `event[keys[0]][keys[1]]...`, or `""`."""
+    value = _event_value(event, *keys)
+    return value if isinstance(value, str) else ""
+
+
+def _is_untrusted_pull_request(event: Mapping[str, object]) -> bool:
+    """Return whether a pull request's head is outside its base repository.
+
+    A missing head repository, as for a deleted fork, counts as untrusted.
+    """
+    head_id = _event_value(event, "pull_request", "head", "repo", "id")
+    base_id = _event_value(event, "pull_request", "base", "repo", "id")
+    if isinstance(head_id, int) and isinstance(base_id, int):
+        return head_id != base_id
+    head = _event_str(event, "pull_request", "head", "repo", "full_name").lower()
+    base = _event_str(event, "pull_request", "base", "repo", "full_name").lower()
+    return not head or head != base
 
 
 def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str] | None:
@@ -319,7 +434,7 @@ def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str]
     schedule, new ref push, missing SHAs, etc.) and instructs callers
     to fall back to a full scan.
     """
-    if event_name in ("pull_request", "pull_request_target"):
+    if event_name in _PULL_REQUEST_EVENTS:
         base = _event_str(event, "pull_request", "base", "sha")
         head = _event_str(event, "pull_request", "head", "sha")
         if not base or not head:
@@ -394,6 +509,250 @@ def _determine_changed_audited_files(
     * `[paths…]` — at least one audited file changed; caller scans
       `scan_path` and gates on findings in these files' directories.
     """
+    changed = _changed_paths(event_name, event, checkout_root, config_paths)
+    if changed is None:
+        return None
+
+    scan_root = scan_path.resolve()
+    files: list[Path] = []
+    for raw in changed:
+        relpath = raw.strip()
+        if not relpath or not _is_audited_path(relpath):
+            continue
+        # `relpath` is relative to the repo root (`checkout_root`), not
+        # to this process's cwd, so it must be re-anchored there before
+        # any further path operations.
+        candidate = checkout_root / relpath
+        try:
+            candidate.resolve().relative_to(scan_root)
+        except ValueError:
+            continue
+        if not candidate.is_file():
+            continue
+        files.append(candidate)
+    return files
+
+
+def _dockerfile_changed(
+    event_name: str,
+    event: Mapping[str, object],
+    dockerfile: Path,
+    checkout_root: Path = Path("."),
+    config_paths: tuple[str, ...] = _CONFIG_TRIGGERS,
+    build_commands: str = "",
+) -> bool:
+    """Return whether the event changed an input of `dockerfile`'s image.
+
+    With `build_commands` any change counts, since they pick their own
+    build context.
+    """
+    changed = _changed_paths(event_name, event, checkout_root, config_paths)
+    if changed is None:
+        return True
+    relpaths = [relpath.strip() for relpath in changed if relpath.strip()]
+    build_files = {
+        dockerfile,
+        dockerfile.with_name(f"{dockerfile.name}.dockerignore"),
+        (checkout_root / ".dockerignore").resolve(),
+    }
+    if any((checkout_root / relpath).resolve() in build_files for relpath in relpaths):
+        return True
+    if build_commands:
+        return bool(relpaths)
+    sources = _dockerfile_sources(dockerfile)
+    return any(sources.matches(relpath) for relpath in relpaths)
+
+
+@dataclass(frozen=True)
+class DockerfileSources:
+    """Build-context paths a Dockerfile reads.
+
+    `whole_context` is set when any path may be read, including sources
+    the parser cannot map to paths.
+    """
+
+    whole_context: bool = False
+    paths: frozenset[str] = frozenset()
+    patterns: frozenset[str] = frozenset()
+
+    def matches(self, relpath: str) -> bool:
+        if self.whole_context:
+            return True
+        if any(
+            relpath == path or relpath.startswith(f"{path}/") for path in self.paths
+        ):
+            return True
+        # fnmatch's '*' matches '/', so 'pattern/*' covers a matched directory.
+        return any(
+            fnmatch.fnmatchcase(relpath, pattern)
+            or fnmatch.fnmatchcase(relpath, f"{pattern}/*")
+            for pattern in self.patterns
+        )
+
+
+_WHOLE_CONTEXT = DockerfileSources(whole_context=True)
+_GLOB_CHARS = frozenset("*?[")
+# '<<EOF', '<<-EOF', "<<'EOF'", '<<"EOF"', but not the here-string '<<<'.
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_DIRECTIVE_RE = re.compile(r"#\s*([A-Za-z]+)\s*=\s*(\S+)\s*")
+_FLAG_RE = re.compile(r"(--\S+)\s+")
+
+
+def _dockerfile_sources(dockerfile: Path) -> DockerfileSources:
+    """Return the paths `COPY`, `ADD` and `RUN --mount` read from the context."""
+    try:
+        text = dockerfile.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning(
+            "cannot read %s (%s); treating every change as an input", dockerfile, exc
+        )
+        return _WHOLE_CONTEXT
+    instructions = _dockerfile_instructions(text)
+    if instructions is None:
+        return _WHOLE_CONTEXT
+    paths: set[str] = set()
+    patterns: set[str] = set()
+    for instruction in instructions:
+        sources = _instruction_sources(instruction)
+        if sources is None:
+            return _WHOLE_CONTEXT
+        for source in sources:
+            path = _context_path(source)
+            if path is None:
+                return _WHOLE_CONTEXT
+            if _GLOB_CHARS.intersection(path):
+                patterns.add(path)
+            else:
+                paths.add(path)
+    return DockerfileSources(paths=frozenset(paths), patterns=frozenset(patterns))
+
+
+def _dockerfile_instructions(text: str) -> list[str] | None:
+    """Return logical instructions, or `None` for an unterminated heredoc."""
+    lines = text.splitlines()
+    escape = "\\"
+    # Parser directives are only honoured at the very top of the file.
+    for line in lines:
+        directive = _DIRECTIVE_RE.fullmatch(line.strip())
+        if directive is None:
+            break
+        if directive.group(1).lower() == "escape":
+            escape = directive.group(2)
+    instructions: list[str] = []
+    current = ""
+    heredoc_terminators: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if heredoc_terminators:
+            if line == heredoc_terminators[0]:
+                heredoc_terminators.pop(0)
+            continue
+        if not line or line.startswith("#"):
+            continue
+        current = f"{current} {line}" if current else line
+        if current.endswith(escape):
+            current = current[: -len(escape)].rstrip()
+            continue
+        instructions.append(current)
+        heredoc_terminators = [
+            match.group(2) for match in _HEREDOC_RE.finditer(current)
+        ]
+        current = ""
+    if heredoc_terminators:
+        return None
+    if current:
+        instructions.append(current)
+    return instructions
+
+
+def _instruction_sources(instruction: str) -> list[str] | None:
+    """Return the context sources an instruction reads, or `None` if unparsable."""
+    opcode, _, rest = instruction.partition(" ")
+    opcode = opcode.lower()
+    flags, rest = _split_flags(rest.strip())
+    if opcode == "run":
+        return _run_mount_sources(flags)
+    if opcode not in {"copy", "add"}:
+        return []
+    if any(flag.startswith("--from=") for flag in flags):
+        return []
+    operands = _copy_operands(rest)
+    if operands is None or len(operands) < 2:
+        return None
+    sources = operands[:-1]
+    return [
+        source
+        for source in sources
+        if not source.startswith("<<")
+        and not (opcode == "add" and ("://" in source or source.startswith("git@")))
+    ]
+
+
+def _split_flags(rest: str) -> tuple[list[str], str]:
+    flags: list[str] = []
+    while (match := _FLAG_RE.match(rest)) is not None:
+        flags.append(match.group(1))
+        rest = rest[match.end() :]
+    return flags, rest
+
+
+def _copy_operands(rest: str) -> list[str] | None:
+    if rest.startswith("["):
+        try:
+            values = json.loads(rest)
+        except json.JSONDecodeError:
+            # Docker falls back to the shell form.
+            values = None
+        if isinstance(values, list):
+            if not all(isinstance(value, str) for value in values):
+                return None
+            return [value for value in values if value.strip()]
+    try:
+        return shlex.split(rest)
+    except ValueError:
+        return None
+
+
+def _run_mount_sources(flags: list[str]) -> list[str]:
+    """Return the sources of bind mounts that read the build context."""
+    sources: list[str] = []
+    for flag in flags:
+        if not flag.startswith("--mount="):
+            continue
+        options: dict[str, str] = {}
+        for field in flag.removeprefix("--mount=").strip("\"'").split(","):
+            key, _, value = field.partition("=")
+            options[key.strip().lower()] = value.strip()
+        if options.get("type", "bind") != "bind" or "from" in options:
+            continue
+        sources.append(options.get("source", options.get("src", ".")))
+    return sources
+
+
+def _context_path(source: str) -> str | None:
+    """Return `source` relative to the context root, as Docker resolves it.
+
+    '/src', './src/' and '../src' all give 'src'. `None` means the source
+    could be any path: the context root or a variable.
+    """
+    if "$" in source:
+        return None
+    path = posixpath.normpath(f"/{source}").lstrip("/")
+    return path or None
+
+
+def _changed_paths(
+    event_name: str,
+    event: Mapping[str, object],
+    checkout_root: Path,
+    config_paths: tuple[str, ...],
+) -> list[str] | None:
+    """Return the repo-root-relative paths the calling event changed.
+
+    `None` means the caller must scan its whole scope: the event has no
+    usable diff range, `git diff` failed, or a Trivy config or ignore file
+    changed (which applies to every file).
+    """
     diff = _diff_range(event_name, event)
     if diff is None:
         return None
@@ -446,25 +805,7 @@ def _determine_changed_audited_files(
             config_change,
         )
         return None
-
-    scan_root = scan_path.resolve()
-    files: list[Path] = []
-    for raw in changed:
-        relpath = raw.strip()
-        if not relpath or not _is_audited_path(relpath):
-            continue
-        # `relpath` is relative to the repo root (`checkout_root`), not
-        # to this process's cwd, so it must be re-anchored there before
-        # any further path operations.
-        candidate = checkout_root / relpath
-        try:
-            candidate.resolve().relative_to(scan_root)
-        except ValueError:
-            continue
-        if not candidate.is_file():
-            continue
-        files.append(candidate)
-    return files
+    return changed
 
 
 def _report_path(raw: object) -> str:
@@ -512,8 +853,10 @@ def _run_trivy(
     *,
     config_path: str,
     scanners: list[str],
-    scan_path: Path,
+    scan_path: Path | None = None,
     ignore_path: Path | None = None,
+    scan_type: str = SCAN_TYPE_FILESYSTEM,
+    image: str = "",
     scope: _ChangedScope | None = None,
 ) -> dict[str, int]:
     """Run trivy for each user-requested format plus an internal JSON
@@ -523,11 +866,27 @@ def _run_trivy(
     The tally counts only findings `scope` contains, or every finding
     when `scope` is `None`. The reports always hold every finding.
     """
+    if scan_type == SCAN_TYPE_FILESYSTEM:
+        if scan_path is None:
+            raise RuntimeError("filesystem scan requires a scan path")
+        scan_command = ["fs", str(scan_path)]
+    elif scan_type == SCAN_TYPE_IMAGE:
+        try:
+            image_reference = validate_image_reference(image)
+        except TrivyTargetError as exc:
+            raise RuntimeError(f"invalid image reference: {exc}") from exc
+        scan_command = ["image", image_reference]
+    else:
+        raise RuntimeError(
+            f"unsupported Trivy scan type '{scan_type}' "
+            f"(expected one of: {', '.join(SCAN_TYPES)})"
+        )
+
     severity_csv = ",".join(_SEVERITY_ORDER)
     scanners_csv = ",".join(scanners)
     base_args: list[str] = [
         str(binary),
-        "fs",
+        *scan_command,
         "--severity",
         severity_csv,
         "--scanners",
@@ -564,7 +923,6 @@ def _run_trivy(
                 tgt.fmt,
                 "--output",
                 str(tgt.path),
-                str(scan_path),
             ]
             log.info("Running: %s", " ".join(cmd))
             try:
@@ -649,6 +1007,41 @@ def _format_tally(counts: Mapping[str, int]) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--scan-type",
+        default=os.environ.get("SCANNER_TRIVY_SCAN_TYPE") or SCAN_TYPE_FILESYSTEM,
+        choices=SCAN_TYPES,
+        help=(
+            "Trivy target type. 'filesystem' (the default) scans "
+            "--source-dir; 'image' builds --image from --dockerfile and "
+            "scans it."
+        ),
+    )
+    p.add_argument(
+        "--image",
+        default=os.environ.get("SCANNER_TRIVY_IMAGE", ""),
+        help="Local image reference to build and scan with --scan-type image.",
+    )
+    p.add_argument(
+        "--dockerfile",
+        default=os.environ.get("SCANNER_TRIVY_DOCKERFILE", ""),
+        help=(
+            "Dockerfile path relative to --checkout-root for --scan-type "
+            "image. In 'changed' mode the image is built and scanned when "
+            "this file, one of its local COPY/ADD sources, or the Trivy "
+            "config/ignore file changed."
+        ),
+    )
+    p.add_argument(
+        "--build-commands",
+        default=os.environ.get("SCANNER_TRIVY_BUILD_COMMANDS", ""),
+        help=(
+            "Bash commands that build --image in place of `docker build "
+            "--file <dockerfile> --tag <image> .`, run from --checkout-root "
+            "with SCANNER_TRIVY_IMAGE and SCANNER_TRIVY_DOCKERFILE set. "
+            "The image is skipped on pull requests from other repositories."
+        ),
+    )
     p.add_argument(
         "--scan-mode",
         default=os.environ.get("SCANNER_SCAN_MODE", "changed"),
@@ -743,6 +1136,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
     args = build_parser().parse_args(argv)
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    event_payload: Mapping[str, object] | None = None
+
+    def _load_event_payload() -> Mapping[str, object]:
+        nonlocal event_payload
+        if event_payload is None:
+            event_payload = gha_load_github_event()
+        return event_payload
 
     try:
         targets = _parse_report_formats(args.report_formats)
@@ -751,8 +1152,29 @@ def main(argv: list[str]) -> int:
         log.error("%s", exc)
         return 1
 
+    image_mode = args.scan_type == SCAN_TYPE_IMAGE
+    build_commands = args.build_commands.strip()
+    try:
+        if image_mode:
+            image = validate_image_reference(args.image)
+            if not args.dockerfile.strip():
+                raise ValueError("--dockerfile is required when --scan-type is image")
+        else:
+            image = ""
+            image_only = {
+                "--image": args.image,
+                "--dockerfile": args.dockerfile,
+                "--build-commands": build_commands,
+            }
+            for flag, value in image_only.items():
+                if value.strip():
+                    raise ValueError(f"{flag} requires --scan-type image")
+    except ValueError as exc:
+        log.error("%s", exc)
+        return 2
+
     source_dir = Path(args.source_dir)
-    if not source_dir.is_dir():
+    if not image_mode and not source_dir.is_dir():
         log.error(
             "scan path '%s' does not exist or is not a directory "
             "(did the checkout step fetch it?)",
@@ -762,6 +1184,14 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
+        # Build commands run on the runner itself, so they never run
+        # against code from another repository.
+        untrusted_build = (
+            image_mode
+            and bool(build_commands)
+            and event_name in _PULL_REQUEST_EVENTS
+            and _is_untrusted_pull_request(_load_event_payload())
+        )
         config_paths = (
             *scanner_config_paths(
                 checkout_root=checkout_root,
@@ -781,26 +1211,57 @@ def main(argv: list[str]) -> int:
             filenames=_IGNORE_FILENAMES,
             configured_path=args.config_path,
         )
-        # Only 'changed' mode needs the event payload, to work out the
-        # diff range. Loading it unconditionally would make 'all' mode
-        # fail on events that have no payload we can parse, even though
-        # it never looks at one.
-        if args.scan_mode == "all":
-            files: list[Path] | None = None
-        else:
-            files = _determine_changed_audited_files(
-                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-                event=gha_load_github_event(),
-                scan_path=source_dir,
-                checkout_root=checkout_root,
-                config_paths=config_paths,
-            )
+        dockerfile_path = (
+            _resolve_dockerfile_path(checkout_root, args.dockerfile)
+            if image_mode
+            else None
+        )
+        # The payload is loaded only when needed, so 'all' mode works on
+        # events without one we can parse.
+        files: list[Path] | None = None
+        image_changed = True
+        if args.scan_mode == "changed" and not untrusted_build:
+            if dockerfile_path is not None:
+                image_changed = _dockerfile_changed(
+                    event_name=event_name,
+                    event=_load_event_payload(),
+                    dockerfile=dockerfile_path,
+                    checkout_root=checkout_root,
+                    config_paths=config_paths,
+                    build_commands=build_commands,
+                )
+            else:
+                files = _determine_changed_audited_files(
+                    event_name=event_name,
+                    event=_load_event_payload(),
+                    scan_path=source_dir,
+                    checkout_root=checkout_root,
+                    config_paths=config_paths,
+                )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
         return 2
 
+    nothing_to_scan = (
+        untrusted_build or not image_changed or (files is not None and not files)
+    )
     scope: _ChangedScope | None = None
-    if files is None:
+    if untrusted_build:
+        message = (
+            f"{image} uses build commands, which do not run on pull requests "
+            "from other repositories; push and scheduled runs scan it"
+        )
+        log.warning("Trivy scope: %s", message)
+        print(f"::warning title=Trivy image scan skipped::{message}", flush=True)
+    elif image_mode and image_changed:
+        log.info("Trivy scope: Docker image %s built from %s", image, args.dockerfile)
+    elif image_mode:
+        log.info(
+            "Trivy scope: %s and the Trivy config are unchanged in the event; "
+            "nothing to build or scan",
+            args.dockerfile,
+        )
+    elif files is None:
         log.info(
             "Trivy scope: recursive scan of %s, gating on every finding",
             source_dir,
@@ -836,11 +1297,18 @@ def main(argv: list[str]) -> int:
     non_sarif = [t for t in targets if t.fmt != "sarif"]
 
     # 'changed' mode with nothing to scan: emit empty paths so uploads skip.
-    if files is not None and not files:
+    if nothing_to_scan:
         gha_set_output({"sarif_path": "", "non_sarif_paths": ""})
         return 0
 
     try:
+        if dockerfile_path is not None:
+            _build_trivy_image(
+                checkout_root=checkout_root,
+                dockerfile=dockerfile_path,
+                image=image,
+                build_commands=build_commands,
+            )
         binary = get_trivy_binary()
         counts = _run_trivy(
             binary,
@@ -849,6 +1317,8 @@ def main(argv: list[str]) -> int:
             scanners=scanners,
             scan_path=source_dir,
             ignore_path=ignore_path,
+            scan_type=args.scan_type,
+            image=image,
             scope=scope,
         )
         # Set outputs only after a successful run, gated on the report

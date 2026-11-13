@@ -9,9 +9,11 @@ from unittest import mock
 from security_scanners.utils.compute_scan_matrix import (
     MAX_TIMEOUT_MINUTES,
     SCANNERS,
+    TRIVY_IMAGE_TIMEOUT_MINUTES,
     build_matrix,
     main,
 )
+from security_scanners.utils.trivy_targets import TrivyImageTarget, TrivyPlan
 
 
 class ScannerRegistryTest(unittest.TestCase):
@@ -46,6 +48,7 @@ class BuildMatrixTest(unittest.TestCase):
         self.assertEqual(
             entries[0],
             {
+                "name": "gitleaks",
                 "scanner": "gitleaks",
                 "module": "security_scanners.github_actions.gitleaks",
                 "timeout_minutes": 30,
@@ -63,6 +66,80 @@ class BuildMatrixTest(unittest.TestCase):
             [spec.name for spec in SCANNERS],
         )
 
+    def test_default_trivy_leg_scans_the_filesystem(self):
+        (trivy,) = [
+            e for e in json.loads(build_matrix(SCANNERS)) if e["name"] == "trivy"
+        ]
+        self.assertEqual(trivy["trivy_scan_type"], "filesystem")
+
+
+class TrivyLegsTest(unittest.TestCase):
+    """Tests for the Trivy filesystem and per-image legs."""
+
+    _IMAGE = TrivyImageTarget(
+        name="trivy-image-rocm-dev",
+        dockerfile="docker/Dockerfile",
+        image="rocm-dev:scan",
+        build_commands="./build.sh",
+    )
+
+    def _trivy_entries(self, plan: TrivyPlan, timeout: int = 0) -> list[dict]:
+        entries = json.loads(build_matrix(SCANNERS, timeout, plan))
+        return [e for e in entries if e["scanner"] == "trivy"]
+
+    def test_each_image_gets_its_own_leg_beside_the_filesystem_leg(self):
+        entries = self._trivy_entries(TrivyPlan(filesystem=True, images=(self._IMAGE,)))
+        self.assertEqual(
+            entries[1],
+            {
+                "name": "trivy-image-rocm-dev",
+                "scanner": "trivy",
+                "module": "security_scanners.github_actions.trivy",
+                "timeout_minutes": TRIVY_IMAGE_TIMEOUT_MINUTES,
+                "runner": "ubuntu-24.04",
+                "trivy_scan_type": "image",
+                "trivy_image": "rocm-dev:scan",
+                "trivy_dockerfile": "docker/Dockerfile",
+                "trivy_build_commands": "./build.sh",
+            },
+        )
+        self.assertEqual(entries[0]["name"], "trivy")
+
+    def test_image_only_drops_the_filesystem_leg(self):
+        entries = self._trivy_entries(
+            TrivyPlan(filesystem=False, images=(self._IMAGE,))
+        )
+        self.assertEqual([e["name"] for e in entries], ["trivy-image-rocm-dev"])
+
+    def test_a_caller_timeout_raises_image_legs_too(self):
+        entries = self._trivy_entries(
+            TrivyPlan(images=(self._IMAGE,)), timeout=MAX_TIMEOUT_MINUTES
+        )
+        self.assertEqual({e["timeout_minutes"] for e in entries}, {MAX_TIMEOUT_MINUTES})
+
+    def test_workflow_inputs_arrive_through_the_environment(self):
+        env = {
+            "SCANNER_TRIVY_SCAN_TYPE": "filesystem,image",
+            "SCANNER_TRIVY_IMAGES": "- dockerfile: Dockerfile\n",
+        }
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch(
+                "security_scanners.utils.compute_scan_matrix.gha_set_output"
+            ) as set_output,
+        ):
+            self.assertEqual(main([]), 0)
+        entries = json.loads(set_output.call_args.args[0]["matrix"])
+        self.assertIn("trivy", [e["name"] for e in entries])
+        self.assertIn("trivy-image-dockerfile", [e["name"] for e in entries])
+
+    def test_invalid_trivy_inputs_fail_planning(self):
+        with mock.patch.dict(
+            os.environ, {"SCANNER_TRIVY_SCAN_TYPE": "image", "SCANNER_TRIVY_IMAGES": ""}
+        ):
+            with self.assertRaises(SystemExit):
+                main([])
+
 
 class TimeoutBudgetTest(unittest.TestCase):
     """Tests for the caller-raisable scanner timeout."""
@@ -73,7 +150,7 @@ class TimeoutBudgetTest(unittest.TestCase):
         ) as set_output:
             self.assertEqual(main(argv), 0)
         entries = json.loads(set_output.call_args.args[0]["matrix"])
-        return {e["scanner"]: e["timeout_minutes"] for e in entries}
+        return {e["name"]: e["timeout_minutes"] for e in entries}
 
     def test_defaults_leave_every_scanner_on_its_own_budget(self):
         self.assertEqual(

@@ -93,6 +93,30 @@ on:
         required: false
         type: string
         default: ""
+      trivy_scan_type:
+        description: >-
+          Comma-separated Trivy targets. 'filesystem' (the default) scans
+          scan_path; 'image' builds and scans every image listed in
+          trivy_images, each on its own runner. Use 'filesystem,image'
+          for both.
+        required: false
+        type: string
+        default: filesystem
+      trivy_images:
+        description: >-
+          YAML list of Docker images to build and scan when
+          trivy_scan_type includes 'image'. Each entry takes a
+          repository-relative 'dockerfile' (required), and optionally a
+          'name' for its check run, a local 'image' tag, and
+          'build_commands' that replace 'docker build --file <dockerfile>
+          --tag <image> .' and must produce that tag. In 'changed' mode an
+          image is built and scanned only when its Dockerfile, one of its
+          local COPY/ADD sources, or the Trivy config/ignore file changed.
+          An image with build_commands is skipped on pull requests from
+          other repositories.
+        required: false
+        type: string
+        default: ""
       zizmor_config_path:
         description: >-
           Optional path to the repository's zizmor YAML config, relative
@@ -140,10 +164,17 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install planner dependencies
+        run: >-
+          python -m pip install --quiet --no-deps --only-binary=:all:
+          --require-hashes -r security_scanners/requirements-plan.txt
+
       - name: Compute scanner matrix
         id: matrix
         env:
           SCANNER_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          SCANNER_TRIVY_SCAN_TYPE: ${{ inputs.trivy_scan_type }}
+          SCANNER_TRIVY_IMAGES: ${{ inputs.trivy_images }}
         run: python -m security_scanners.utils.compute_scan_matrix
 
   codeql:
@@ -159,7 +190,7 @@ jobs:
       timeout_minutes: ${{ inputs.timeout_minutes }}
 
   scan:
-    name: ${{ matrix.scanner }}
+    name: ${{ matrix.name }}
     needs: plan
     if: >-
       github.event_name != 'pull_request' ||
@@ -209,6 +240,10 @@ jobs:
           SCANNER_BANDIT_CONFIG_PATH: ${{ inputs.bandit_config_path }}
           SCANNER_GITLEAKS_CONFIG_PATH: ${{ inputs.gitleaks_config_path }}
           SCANNER_TRIVY_CONFIG_PATH: ${{ inputs.trivy_config_path }}
+          SCANNER_TRIVY_SCAN_TYPE: ${{ matrix.trivy_scan_type }}
+          SCANNER_TRIVY_IMAGE: ${{ matrix.trivy_image }}
+          SCANNER_TRIVY_DOCKERFILE: ${{ matrix.trivy_dockerfile }}
+          SCANNER_TRIVY_BUILD_COMMANDS: ${{ matrix.trivy_build_commands }}
           SCANNER_ZIZMOR_CONFIG_PATH: ${{ inputs.zizmor_config_path }}
           SCANNER_SOURCE_DIR: .scan-target/${{ inputs.scan_path }}
           SCANNER_CHECKOUT_ROOT: .scan-target
@@ -219,14 +254,14 @@ jobs:
         uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           sarif_file: ${{ steps.scan.outputs.sarif_path }}
-          category: ${{ matrix.scanner }}
+          category: ${{ matrix.name }}
           checkout_path: .scan-target
 
       - name: Upload non-SARIF reports
         if: always() && steps.scan.outputs.non_sarif_paths != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ matrix.scanner }}-report
+          name: ${{ matrix.name }}-report
           path: ${{ steps.scan.outputs.non_sarif_paths }}
           if-no-files-found: ignore
 

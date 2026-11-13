@@ -46,6 +46,9 @@ _MAX_TOTAL_BYTES = 20 * 1024 * 1024
 _MAX_MEMBERS = 20
 _MAX_PAGES = 100
 _CODEQL_ARTIFACT_RE = re.compile(r"^codeql-report-[A-Za-z0-9_.+-]+$")
+# One Trivy leg per Docker image, named `trivy-image-<name>` by
+# `trivy_targets`; its report artifact is `<leg>-report`.
+_TRIVY_IMAGE_LEG_RE = re.compile(r"^trivy-image-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
 
 
 class SkipRun(RuntimeError):
@@ -346,8 +349,17 @@ def list_artifacts(api: GitHubApi, context: PullRequestContext) -> list[Artifact
     return [
         artifact
         for artifact in _run_artifacts(api, context.repository, context.run_id)
-        if artifact.name in expected or _CODEQL_ARTIFACT_RE.fullmatch(artifact.name)
+        if artifact.name in expected
+        or _CODEQL_ARTIFACT_RE.fullmatch(artifact.name)
+        or _TRIVY_IMAGE_LEG_RE.fullmatch(artifact.name.removesuffix("-report"))
     ]
+
+
+def _artifact_source(artifact_name: str) -> str:
+    """Return the scan job an artifact came from: a scanner or a Trivy image leg."""
+    if artifact_name.startswith("codeql-report-"):
+        return "codeql"
+    return artifact_name.removesuffix("-report")
 
 
 def _validate_member(info: zipfile.ZipInfo) -> None:
@@ -377,6 +389,8 @@ def _allowed_member(artifact_name: str, member_name: str) -> tuple[bool, str]:
     if artifact_name.startswith("codeql-report-"):
         return basename.endswith(".sarif"), "codeql"
     scanner = artifact_name.removesuffix("-report")
+    if _TRIVY_IMAGE_LEG_RE.fullmatch(scanner):
+        scanner = "trivy"
     allowed = {
         "bandit": {"bandit-report.json", "bandit-report.txt"},
         "gitleaks": {"gitleaks-report.csv", "gitleaks-report.json"},
@@ -481,7 +495,8 @@ def collect_findings(
             reports = read_artifact_reports(artifact.name, archive)
             for report in reports:
                 findings.extend(parse_report(report.scanner, report.data))
-                observed.add(report.scanner)
+            if reports:
+                observed.add(_artifact_source(artifact.name))
         except (RuntimeError, ValueError) as exc:
             reasons.append(f"{label} report could not be processed: {exc}")
     return CollectionResult(
@@ -496,6 +511,9 @@ def _job_scanner(name: str) -> str:
     for scanner in _EXPECTED_SCANNERS:
         if lowered == scanner or lowered.endswith(f" / {scanner}"):
             return scanner
+    leg = lowered.rsplit(" / ", 1)[-1]
+    if _TRIVY_IMAGE_LEG_RE.fullmatch(leg):
+        return leg
     if "codeql" in lowered:
         return "codeql"
     return ""
