@@ -18,8 +18,8 @@ In image mode (`--scan-type image`) one invocation builds and scans one
 image: `--dockerfile` names its Dockerfile and `--image` the local tag.
 The image is built with `docker build` from the checkout root, or by
 `--build-commands` when given, which must produce `--image`. In 'changed'
-mode the build and scan run only when the calling event changed that
-Dockerfile or the Trivy config/ignore file.
+mode the build and scan run only when the calling event changed one of
+the image's inputs or the Trivy config/ignore file.
 
 Default scanners are `misconfig,vuln,license`; `secret` is omitted
 because gitleaks already covers secret detection.
@@ -47,6 +47,9 @@ import fnmatch
 import json
 import logging
 import os
+import posixpath
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -327,14 +330,7 @@ def _build_trivy_image(
     image: str,
     build_commands: str = "",
 ) -> None:
-    """Build the image the subsequent Trivy image scan inspects.
-
-    Without `build_commands`, runs `docker build` on `dockerfile` with the
-    checkout root as context. With them, runs the commands in bash from the
-    checkout root instead, with `SCANNER_TRIVY_IMAGE` and
-    `SCANNER_TRIVY_DOCKERFILE` (checkout-relative) in their environment.
-    Either way the image must exist locally afterwards.
-    """
+    """Build `image` with `docker build`, or with `build_commands` instead."""
     if build_commands:
         dockerfile_relpath = dockerfile.relative_to(checkout_root.resolve())
         command = ["bash", "-euo", "pipefail", "-c", build_commands]
@@ -516,20 +512,206 @@ def _dockerfile_changed(
     dockerfile: Path,
     checkout_root: Path = Path("."),
     config_paths: tuple[str, ...] = _CONFIG_TRIGGERS,
+    build_commands: str = "",
 ) -> bool:
-    """Return whether an image built from `dockerfile` needs a scan.
+    """Return whether the event changed an input of `dockerfile`'s image.
 
-    True when the calling event changed `dockerfile` (a resolved path) or
-    a Trivy config/ignore file, or when it has no usable diff range.
+    With `build_commands` any change counts, since they pick their own
+    build context.
     """
     changed = _changed_paths(event_name, event, checkout_root, config_paths)
     if changed is None:
         return True
-    return any(
-        (checkout_root / relpath.strip()).resolve() == dockerfile
-        for relpath in changed
-        if relpath.strip()
-    )
+    relpaths = [relpath.strip() for relpath in changed if relpath.strip()]
+    build_files = {
+        dockerfile,
+        dockerfile.with_name(f"{dockerfile.name}.dockerignore"),
+        (checkout_root / ".dockerignore").resolve(),
+    }
+    if any((checkout_root / relpath).resolve() in build_files for relpath in relpaths):
+        return True
+    if build_commands:
+        return bool(relpaths)
+    sources = _dockerfile_sources(dockerfile)
+    return any(sources.matches(relpath) for relpath in relpaths)
+
+
+@dataclass(frozen=True)
+class DockerfileSources:
+    """Build-context paths a Dockerfile reads.
+
+    `whole_context` is set when any path may be read, including sources
+    the parser cannot map to paths.
+    """
+
+    whole_context: bool = False
+    paths: frozenset[str] = frozenset()
+    patterns: frozenset[str] = frozenset()
+
+    def matches(self, relpath: str) -> bool:
+        if self.whole_context:
+            return True
+        if any(
+            relpath == path or relpath.startswith(f"{path}/") for path in self.paths
+        ):
+            return True
+        # fnmatch's '*' matches '/', so 'pattern/*' covers a matched directory.
+        return any(
+            fnmatch.fnmatchcase(relpath, pattern)
+            or fnmatch.fnmatchcase(relpath, f"{pattern}/*")
+            for pattern in self.patterns
+        )
+
+
+_WHOLE_CONTEXT = DockerfileSources(whole_context=True)
+_GLOB_CHARS = frozenset("*?[")
+# '<<EOF', '<<-EOF', "<<'EOF'", '<<"EOF"', but not the here-string '<<<'.
+_HEREDOC_RE = re.compile(r"(?<!<)<<(?!<)-?([\"']?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_DIRECTIVE_RE = re.compile(r"#\s*([A-Za-z]+)\s*=\s*(\S+)\s*")
+_FLAG_RE = re.compile(r"(--\S+)\s+")
+
+
+def _dockerfile_sources(dockerfile: Path) -> DockerfileSources:
+    """Return the paths `COPY`, `ADD` and `RUN --mount` read from the context."""
+    try:
+        text = dockerfile.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning(
+            "cannot read %s (%s); treating every change as an input", dockerfile, exc
+        )
+        return _WHOLE_CONTEXT
+    instructions = _dockerfile_instructions(text)
+    if instructions is None:
+        return _WHOLE_CONTEXT
+    paths: set[str] = set()
+    patterns: set[str] = set()
+    for instruction in instructions:
+        sources = _instruction_sources(instruction)
+        if sources is None:
+            return _WHOLE_CONTEXT
+        for source in sources:
+            path = _context_path(source)
+            if path is None:
+                return _WHOLE_CONTEXT
+            if _GLOB_CHARS.intersection(path):
+                patterns.add(path)
+            else:
+                paths.add(path)
+    return DockerfileSources(paths=frozenset(paths), patterns=frozenset(patterns))
+
+
+def _dockerfile_instructions(text: str) -> list[str] | None:
+    """Return logical instructions, or `None` for an unterminated heredoc."""
+    lines = text.splitlines()
+    escape = "\\"
+    # Parser directives are only honoured at the very top of the file.
+    for line in lines:
+        directive = _DIRECTIVE_RE.fullmatch(line.strip())
+        if directive is None:
+            break
+        if directive.group(1).lower() == "escape":
+            escape = directive.group(2)
+    instructions: list[str] = []
+    current = ""
+    heredoc_terminators: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if heredoc_terminators:
+            if line == heredoc_terminators[0]:
+                heredoc_terminators.pop(0)
+            continue
+        if not line or line.startswith("#"):
+            continue
+        current = f"{current} {line}" if current else line
+        if current.endswith(escape):
+            current = current[: -len(escape)].rstrip()
+            continue
+        instructions.append(current)
+        heredoc_terminators = [
+            match.group(2) for match in _HEREDOC_RE.finditer(current)
+        ]
+        current = ""
+    if heredoc_terminators:
+        return None
+    if current:
+        instructions.append(current)
+    return instructions
+
+
+def _instruction_sources(instruction: str) -> list[str] | None:
+    """Return the context sources an instruction reads, or `None` if unparsable."""
+    opcode, _, rest = instruction.partition(" ")
+    opcode = opcode.lower()
+    flags, rest = _split_flags(rest.strip())
+    if opcode == "run":
+        return _run_mount_sources(flags)
+    if opcode not in {"copy", "add"}:
+        return []
+    if any(flag.startswith("--from=") for flag in flags):
+        return []
+    operands = _copy_operands(rest)
+    if operands is None or len(operands) < 2:
+        return None
+    sources = operands[:-1]
+    return [
+        source
+        for source in sources
+        if not source.startswith("<<")
+        and not (opcode == "add" and ("://" in source or source.startswith("git@")))
+    ]
+
+
+def _split_flags(rest: str) -> tuple[list[str], str]:
+    flags: list[str] = []
+    while (match := _FLAG_RE.match(rest)) is not None:
+        flags.append(match.group(1))
+        rest = rest[match.end() :]
+    return flags, rest
+
+
+def _copy_operands(rest: str) -> list[str] | None:
+    if rest.startswith("["):
+        try:
+            values = json.loads(rest)
+        except json.JSONDecodeError:
+            # Docker falls back to the shell form.
+            values = None
+        if isinstance(values, list):
+            if not all(isinstance(value, str) for value in values):
+                return None
+            return [value for value in values if value.strip()]
+    try:
+        return shlex.split(rest)
+    except ValueError:
+        return None
+
+
+def _run_mount_sources(flags: list[str]) -> list[str]:
+    """Return the sources of bind mounts that read the build context."""
+    sources: list[str] = []
+    for flag in flags:
+        if not flag.startswith("--mount="):
+            continue
+        options: dict[str, str] = {}
+        for field in flag.removeprefix("--mount=").strip("\"'").split(","):
+            key, _, value = field.partition("=")
+            options[key.strip().lower()] = value.strip()
+        if options.get("type", "bind") != "bind" or "from" in options:
+            continue
+        sources.append(options.get("source", options.get("src", ".")))
+    return sources
+
+
+def _context_path(source: str) -> str | None:
+    """Return `source` relative to the context root, as Docker resolves it.
+
+    '/src', './src/' and '../src' all give 'src'. `None` means the source
+    could be any path: the context root or a variable.
+    """
+    if "$" in source:
+        return None
+    path = posixpath.normpath(f"/{source}").lstrip("/")
+    return path or None
 
 
 def _changed_paths(
@@ -933,6 +1115,7 @@ def main(argv: list[str]) -> int:
                 dockerfile=dockerfile_path,
                 checkout_root=checkout_root,
                 config_paths=config_paths,
+                build_commands=build_commands,
             )
         elif args.scan_mode == "changed":
             files = _determine_changed_audited_files(

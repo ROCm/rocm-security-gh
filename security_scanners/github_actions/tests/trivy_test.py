@@ -22,6 +22,7 @@ from trivy import (
     _determine_changed_audited_files,
     _diff_range,
     _dockerfile_changed,
+    _dockerfile_sources,
     _is_audited_path,
     _parse_report_formats,
     _parse_scanners,
@@ -212,6 +213,18 @@ class MainTest(unittest.TestCase):
         )
         mocks["build_image"].assert_called_once()
         mocks["run_trivy"].assert_called_once()
+
+    def test_image_mode_passes_build_commands_to_change_detection(self):
+        rc, mocks = self._image_main(
+            "changed",
+            dockerfile_changed=True,
+            extra=("--build-commands", "make image"),
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            mocks["changed"].call_args.kwargs["build_commands"], "make image"
+        )
 
     def test_image_mode_passes_build_commands_to_the_build(self):
         rc, mocks = self._image_main(
@@ -568,8 +581,7 @@ class BuildTrivyImageTest(unittest.TestCase):
             )
 
     def test_build_that_produces_no_image_raises(self):
-        # Build commands are free-form, so a successful exit does not
-        # prove they tagged the image the scan is about to look for.
+        # A successful exit doesn't prove the commands tagged the image.
         with (
             mock.patch(
                 "trivy.subprocess.run",
@@ -599,7 +611,9 @@ class DockerfileChangedTest(unittest.TestCase):
         self._dockerfile = (self._root / "docker" / "Dockerfile").resolve()
         self._dockerfile.write_text("FROM scratch\n", encoding="utf-8")
 
-    def _changed(self, diff_output: str, event_name: str = "push") -> bool:
+    def _changed(
+        self, diff_output: str, event_name: str = "push", build_commands: str = ""
+    ) -> bool:
         with mock.patch("trivy.subprocess.run") as run:
             run.side_effect = [
                 mock.Mock(returncode=0, stdout="", stderr=""),
@@ -610,7 +624,54 @@ class DockerfileChangedTest(unittest.TestCase):
                 event={"before": "abc", "after": "def"},
                 dockerfile=self._dockerfile,
                 checkout_root=self._root,
+                build_commands=build_commands,
             )
+
+    def test_a_root_dockerignore_change_needs_a_scan(self):
+        self.assertTrue(self._changed(".dockerignore\n"))
+
+    def test_a_dockerfile_specific_dockerignore_change_needs_a_scan(self):
+        self.assertTrue(self._changed("docker/Dockerfile.dockerignore\n"))
+
+    def test_another_directory_dockerignore_does_not(self):
+        self.assertFalse(self._changed("other/.dockerignore\n"))
+
+    def test_build_commands_make_any_change_need_a_scan(self):
+        self._dockerfile.write_text("FROM scratch\nCOPY src /app\n", encoding="utf-8")
+        self.assertTrue(self._changed("docs/readme.md\n", build_commands="make image"))
+
+    def test_build_commands_with_an_empty_diff_do_not(self):
+        self.assertFalse(self._changed("", build_commands="make image"))
+
+    def test_a_changed_dot_directory_source_needs_a_scan(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY .github/scripts /scripts\n", encoding="utf-8"
+        )
+        self.assertTrue(self._changed(".github/scripts/build.sh\n"))
+
+    def test_a_json_form_source_needs_a_scan_only_when_changed(self):
+        self._dockerfile.write_text(
+            'FROM scratch\nCOPY ["requirements.txt", "/app/"]\n', encoding="utf-8"
+        )
+        self.assertTrue(self._changed("requirements.txt\n"))
+        self.assertFalse(self._changed("docs/readme.md\n"))
+
+    def test_a_file_under_a_globbed_directory_needs_a_scan(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY conf/*.d /etc/\n", encoding="utf-8"
+        )
+        self.assertTrue(self._changed("conf/app.d/settings.ini\n"))
+        self.assertFalse(self._changed("conf/app.ini\n"))
+
+    def test_a_run_bind_mount_source_needs_a_scan(self):
+        self._dockerfile.write_text(
+            "FROM python:3.12\n"
+            "RUN --mount=type=bind,source=requirements.txt,target=/tmp/req.txt \\\n"
+            "    pip install -r /tmp/req.txt\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(self._changed("requirements.txt\n"))
+        self.assertFalse(self._changed("docs/readme.md\n"))
 
     def test_a_changed_dockerfile_needs_a_scan(self):
         self.assertTrue(self._changed("README.md\ndocker/Dockerfile\n"))
@@ -618,6 +679,56 @@ class DockerfileChangedTest(unittest.TestCase):
     def test_other_changes_do_not(self):
         # Including another Dockerfile, which has its own image leg.
         self.assertFalse(self._changed("README.md\nother/Dockerfile\n"))
+
+    def test_copying_the_repository_root_triggers_on_any_change(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY . /workspace\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(self._changed("src/main.py\n"))
+
+    def test_a_changed_copied_file_needs_a_scan(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY requirements.txt /app/requirements.txt\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(self._changed("requirements.txt\n"))
+
+    def test_a_changed_file_in_a_copied_directory_needs_a_scan(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY src /app/src\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(self._changed("src/module/main.py\n"))
+
+    def test_unrelated_changes_do_not_trigger_copied_sources(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY src /app/src\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(self._changed("docs/readme.md\n"))
+
+    def test_copy_from_another_stage_does_not_depend_on_checkout_files(self):
+        self._dockerfile.write_text(
+            "FROM base AS builder\nRUN make\nFROM runtime\n"
+            "COPY --from=builder /out/app /app\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(self._changed("src/main.py\n"))
+
+    def test_add_url_does_not_depend_on_checkout_files(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nADD https://example.com/archive.tgz /app\n",
+            encoding="utf-8",
+        )
+        self.assertFalse(self._changed("src/main.py\n"))
+
+    def test_variable_source_falls_back_to_scan(self):
+        self._dockerfile.write_text(
+            "FROM scratch\nCOPY ${SRC_DIR} /app/src\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(self._changed("docs/readme.md\n"))
 
     def test_a_config_change_needs_a_scan(self):
         self.assertTrue(self._changed(".trivyignore.yaml\n"))
@@ -631,6 +742,119 @@ class DockerfileChangedTest(unittest.TestCase):
                 checkout_root=self._root,
             )
         )
+
+
+class DockerfileSourcesTest(unittest.TestCase):
+    """Tests for `_dockerfile_sources`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._dockerfile = Path(self._tmp.name) / "Dockerfile"
+
+    def _sources(self, text: str):
+        self._dockerfile.write_text(text, encoding="utf-8")
+        return _dockerfile_sources(self._dockerfile)
+
+    def test_sources_resolve_inside_the_context(self):
+        sources = self._sources(
+            "FROM scratch\n"
+            "COPY ./src/ /app/src\n"
+            "COPY /etc/app.conf .env ../vendor /app/\n"
+        )
+        self.assertFalse(sources.whole_context)
+        self.assertEqual(
+            sources.paths, frozenset({"src", "etc/app.conf", ".env", "vendor"})
+        )
+
+    def test_the_context_root_is_the_whole_context(self):
+        for source in (".", "./", "/", "../"):
+            with self.subTest(source=source):
+                sources = self._sources(f"FROM scratch\nCOPY {source} /app\n")
+                self.assertTrue(sources.whole_context)
+
+    def test_flags_are_not_sources(self):
+        sources = self._sources(
+            "FROM scratch\nCOPY --chown=1000:1000 --chmod=644 --link app.py /app/\n"
+        )
+        self.assertEqual(sources.paths, frozenset({"app.py"}))
+
+    def test_json_form_keeps_spaces_in_sources(self):
+        sources = self._sources('FROM scratch\nCOPY ["my dir", "b.txt", "/app/"]\n')
+        self.assertEqual(sources.paths, frozenset({"my dir", "b.txt"}))
+
+    def test_json_form_add_url_is_not_a_source(self):
+        sources = self._sources(
+            'FROM scratch\nADD ["https://example.com/a.tgz", "local.tgz", "/app/"]\n'
+        )
+        self.assertEqual(sources.paths, frozenset({"local.tgz"}))
+
+    def test_add_git_remote_is_not_a_source(self):
+        sources = self._sources("FROM scratch\nADD git@github.com:ROCm/repo.git /src\n")
+        self.assertEqual(sources.paths, frozenset())
+        self.assertFalse(sources.whole_context)
+
+    def test_continuation_lines_are_joined(self):
+        sources = self._sources("FROM scratch\nCOPY a.txt \\\n     b.txt \\\n /app/\n")
+        self.assertEqual(sources.paths, frozenset({"a.txt", "b.txt"}))
+
+    def test_escape_directive_changes_the_continuation_character(self):
+        sources = self._sources(
+            "# escape=`\nFROM scratch\nCOPY a.txt `\n     b.txt `\n C:/app/\n"
+        )
+        self.assertEqual(sources.paths, frozenset({"a.txt", "b.txt"}))
+
+    def test_globs_are_patterns(self):
+        sources = self._sources("FROM scratch\nCOPY requirements*.txt /app/\n")
+        self.assertEqual(sources.patterns, frozenset({"requirements*.txt"}))
+        self.assertTrue(sources.matches("requirements-dev.txt"))
+
+    def test_heredoc_bodies_are_not_instructions(self):
+        sources = self._sources(
+            "FROM scratch\n"
+            "COPY <<EOF /app/notes.txt\n"
+            "COPY . /x\n"
+            "EOF\n"
+            "RUN <<-'SCRIPT'\n"
+            "ADD . /y\n"
+            "SCRIPT\n"
+            "COPY app.py /app/\n"
+        )
+        self.assertFalse(sources.whole_context)
+        self.assertEqual(sources.paths, frozenset({"app.py"}))
+
+    def test_a_here_string_is_not_a_heredoc(self):
+        sources = self._sources('FROM ubuntu\nRUN grep x <<<"x"\nCOPY app.py /app/\n')
+        self.assertEqual(sources.paths, frozenset({"app.py"}))
+
+    def test_an_unterminated_heredoc_is_the_whole_context(self):
+        sources = self._sources("FROM ubuntu\nRUN cat <<EOF\nCOPY app.py /app/\n")
+        self.assertTrue(sources.whole_context)
+
+    def test_bind_mounts_read_the_context(self):
+        sources = self._sources(
+            "FROM python:3.12\n"
+            "RUN --mount=type=bind,source=requirements.txt,target=/r.txt "
+            "--mount=type=cache,target=/root/.cache pip install -r /r.txt\n"
+            "RUN --mount=src=tools,target=/tools /tools/setup.sh\n"
+            "RUN --mount=type=bind,from=builder,source=/out,target=/out true\n"
+            "RUN --mount=type=secret,id=token true\n"
+        )
+        self.assertEqual(sources.paths, frozenset({"requirements.txt", "tools"}))
+
+    def test_a_bind_mount_without_a_source_is_the_whole_context(self):
+        sources = self._sources(
+            "FROM python:3.12\nRUN --mount=type=bind,target=/src make -C /src\n"
+        )
+        self.assertTrue(sources.whole_context)
+
+    def test_unparsable_operands_are_the_whole_context(self):
+        sources = self._sources("FROM scratch\nCOPY 'unterminated /app\n")
+        self.assertTrue(sources.whole_context)
+
+    def test_an_unreadable_dockerfile_is_the_whole_context(self):
+        self._dockerfile.write_bytes(b"\xff\xfe\x00")
+        self.assertTrue(_dockerfile_sources(self._dockerfile).whole_context)
 
 
 class TrivySubprocessEnvTest(unittest.TestCase):

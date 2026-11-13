@@ -31,12 +31,10 @@ DEFAULT_SCAN_TYPES = SCAN_TYPE_FILESYSTEM
 IMAGE_LEG_PREFIX = "trivy-image-"
 
 _IMAGE_KEYS = frozenset({"dockerfile", "name", "image", "build_commands"})
-# Lowercase alphanumerics and inner hyphens: valid in a check-run name, a
-# SARIF category, an artifact name and a Docker repository name alike.
+# Valid as a check-run name, SARIF category, artifact and Docker repository.
 _NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 _SLUG_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
-# Registry host, path, tag and digest characters. The leading character
-# keeps the reference from ever being read as a docker or trivy flag.
+# The leading character keeps the reference from being read as a flag.
 _IMAGE_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:@-]*$")
 
 
@@ -46,16 +44,7 @@ class TrivyTargetError(ValueError):
 
 @dataclass(frozen=True)
 class TrivyImageTarget:
-    """One image to build and scan on its own runner.
-
-    Attributes:
-        name: Matrix leg name, also its check run, SARIF category and
-            report artifact stem (`trivy-image-<name>`).
-        dockerfile: Normalized repository-relative Dockerfile path.
-        image: Local image reference the build produces and trivy scans.
-        build_commands: Shell commands that replace `docker build`, or
-            empty to build `dockerfile` with the repository root as context.
-    """
+    """One image to build and scan on its own runner."""
 
     name: str
     dockerfile: str
@@ -171,8 +160,7 @@ def parse_image_targets(raw: str) -> tuple[TrivyImageTarget, ...]:
     """Parse the `trivy_images` YAML list."""
     if not raw.strip():
         return ()
-    # PyYAML is installed only in the plan job; the scanner jobs import
-    # this module for `validate_image_reference` and never parse YAML.
+    # PyYAML is installed only in the plan job.
     import yaml
 
     try:

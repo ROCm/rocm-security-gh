@@ -277,11 +277,17 @@ own regularly updated vulnerability, policy and license databases.
   in the local Docker image store.
 
 - With `scan_mode: changed`, an image is built and scanned only when the
-  calling event changed its Dockerfile or the Trivy config or ignore
-  file; `scan_mode: all` always builds and scans every image. A change
-  to other files the image copies in does not trigger a build on its
-  own. Image legs get a 90-minute budget, and `timeout_minutes` raises
-  it like any other.
+  calling event changed one of its inputs: its Dockerfile, the
+  repository-root `.dockerignore` or `<Dockerfile>.dockerignore`, the
+  Trivy config or ignore file, or a path the Dockerfile reads from the
+  build context. Those are the local sources of `COPY` and `ADD` (a
+  directory or glob covers everything below it) and the bind mounts of
+  `RUN --mount`. A source the parser cannot map to paths, such as one
+  containing a variable, counts as the whole repository. Because an
+  entry with `build_commands` picks its own build context, any change
+  rebuilds it. `scan_mode: all` always builds and scans every image.
+  Image legs get a 90-minute budget, and `timeout_minutes` raises it
+  like any other.
 
   ```yaml
   jobs:
