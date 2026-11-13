@@ -254,10 +254,15 @@ own regularly updated vulnerability, policy and license databases.
   `spdx-json`, `github`, and `human` (an alias for `table`)
 
 - `scan_mode: changed` is a no-op unless the calling event touched a
-  dependency manifest, IaC or container file, and otherwise scans all of
-  `scan_path`: trivy needs the whole subtree to resolve transitive
-  dependencies and cross-file IaC references, so unlike bandit and zizmor
-  it is never handed an individual file list.
+  dependency manifest, IaC or container file. trivy still scans all of
+  `scan_path`, because it needs the whole subtree to resolve transitive
+  dependencies and cross-file IaC references, but the run fails only on
+  findings in a changed file or in a file in the same directory as one.
+  That keeps a manifest change gated on its lockfile's vulnerabilities
+  and a `.tfvars` change on its module's resources. A finding the change
+  causes in another directory, such as a module's caller, appears in the
+  reports but does not fail the run. A missing diff range, or a change to
+  trivy's config or ignore file, gates on every finding.
 
 - `trivy_scan_type` selects Trivy's targets: `filesystem` (the default)
   scans `scan_path`, `image` builds and scans each image listed in
@@ -287,7 +292,8 @@ own regularly updated vulnerability, policy and license databases.
   `RUN --mount`. A source the parser cannot map to paths, such as one
   containing a variable, counts as the whole repository. Because an
   entry with `build_commands` picks its own build context, any change
-  rebuilds it. `scan_mode: all` always builds and scans every image.
+  rebuilds it. `scan_mode: all` always builds and scans every image,
+  and an image scan fails on any finding in the image.
   Image legs get a 90-minute budget, and `timeout_minutes` raises it
   like any other.
 
@@ -313,7 +319,7 @@ own regularly updated vulnerability, policy and license databases.
   scanners never execute the scanned repository's code.
 
 - Fails on findings at or above HIGH severity; reports still carry every
-  finding. Runs trivy's `misconfig`, `vuln` and `license` scanners;
+  finding, including those outside the changed files' directories. Runs trivy's `misconfig`, `vuln` and `license` scanners;
   `secret` is deliberately left out because gitleaks already covers
   secret detection.
 

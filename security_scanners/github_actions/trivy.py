@@ -7,12 +7,15 @@
 - Require the baseline Trivy config (hard error if missing).
 - Derive change sets from the GitHub event for changed/all scans; in
   'changed' mode short-circuit to a no-op unless a dependency
-  manifest / IaC / container file changed under `--source-dir` (trivy's
-  filesystem scanner needs the whole subtree to resolve transitive
-  deps and cross-file IaC references, so -- unlike bandit/zizmor --
-  individual changed files are never fed to it directly: we either
-  scan the whole subtree or nothing). Run per requested format and
-  emit SARIF/non-SARIF paths plus a severity tally.
+  manifest / IaC / container file changed under `--source-dir`.
+- Scan the whole of `--source-dir` either way: trivy's filesystem
+  scanner needs the whole subtree to resolve transitive deps and
+  cross-file IaC references, so -- unlike bandit/zizmor -- individual
+  changed files are never fed to it directly. Run per requested format
+  and emit SARIF/non-SARIF paths.
+- Tally findings by severity. In 'changed' mode only findings in a
+  changed audited file, or in a file in the same directory as one,
+  count toward `--severity-threshold`; the reports keep every finding.
 
 In image mode (`--scan-type image`) one invocation builds and scans one
 image: `--dockerfile` names its Dockerfile and `--image` the local tag.
@@ -485,11 +488,11 @@ def _determine_changed_audited_files(
     """Return the changed audited files inside `scan_path`, or `None`.
 
     Filters the git diff to `_AUDITED_PATTERNS`. The result drives the
-    'changed' mode short-circuit but, unlike bandit/zizmor, the files
-    themselves are NOT fed to trivy: its filesystem scanner needs the
-    whole subtree to resolve transitive deps and cross-file IaC
-    references, so we either scan everything under `scan_path` or
-    nothing.
+    'changed' mode short-circuit and the scope of the severity gate
+    (`_ChangedScope`), but, unlike bandit/zizmor, the files themselves
+    are NOT fed to trivy: its filesystem scanner needs the whole subtree
+    to resolve transitive deps and cross-file IaC references, so we
+    either scan everything under `scan_path` or nothing.
 
     `checkout_root` is the scan target's git checkout (its repo root),
     which this function runs `git` in explicitly: `scan_path` may point
@@ -499,12 +502,12 @@ def _determine_changed_audited_files(
 
     Semantics:
 
-    * `None` — no usable diff range; caller should fall back to a full
-      recursive scan of `scan_path`.
+    * `None` — no usable diff range, or a trivy config or ignore file
+      changed; caller scans `scan_path` and gates on every finding.
     * `[]` — diff range was usable but contained no audited files under
       `scan_path`; caller should treat this as a clean no-op.
-    * `[paths…]` — at least one audited file changed; caller should run
-      trivy against `scan_path` and log the trigger files.
+    * `[paths…]` — at least one audited file changed; caller scans
+      `scan_path` and gates on findings in these files' directories.
     """
     changed = _changed_paths(event_name, event, checkout_root, config_paths)
     if changed is None:
@@ -805,6 +808,45 @@ def _changed_paths(
     return changed
 
 
+def _report_path(raw: object) -> str:
+    """Normalize a trivy report path, e.g. `./modules/vpc/main.tf`."""
+    path = str(raw or "").replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+@dataclass(frozen=True)
+class _ChangedScope:
+    """The report paths whose findings gate a 'changed' scan.
+
+    Paths are relative to the scan root, as trivy writes them in a
+    report's `Target` and `FilePath` fields. A finding is in scope when
+    its file is a changed audited file or sits in the same directory as
+    one: a manifest change then still gates on the vulnerabilities trivy
+    reports against the lockfile beside it, and a `.tfvars` change on
+    the resources in its module. A finding in another directory, such as
+    a module caller, is out of scope even when the change caused it.
+    """
+
+    files: frozenset[str]
+    directories: frozenset[str]
+
+    @classmethod
+    def from_files(cls, scan_path: Path, files: list[Path]) -> "_ChangedScope":
+        scan_root = scan_path.resolve()
+        relpaths = frozenset(
+            path.resolve().relative_to(scan_root).as_posix() for path in files
+        )
+        return cls(
+            files=relpaths,
+            directories=frozenset(posixpath.dirname(p) for p in relpaths),
+        )
+
+    def contains(self, path: str) -> bool:
+        return path in self.files or posixpath.dirname(path) in self.directories
+
+
 def _run_trivy(
     binary: Path,
     user_targets: list[_ReportTarget],
@@ -815,10 +857,14 @@ def _run_trivy(
     ignore_path: Path | None = None,
     scan_type: str = SCAN_TYPE_FILESYSTEM,
     image: str = "",
+    scope: _ChangedScope | None = None,
 ) -> dict[str, int]:
     """Run trivy for each user-requested format plus an internal JSON
     tally pass if the user didn't already request one, and return a
     severity tally.
+
+    The tally counts only findings `scope` contains, or every finding
+    when `scope` is `None`. The reports always hold every finding.
     """
     if scan_type == SCAN_TYPE_FILESYSTEM:
         if scan_path is None:
@@ -898,7 +944,13 @@ def _run_trivy(
                     f"{completed.stderr.strip() if completed.stderr else '<empty>'}"
                 )
 
-        return _tally_findings_by_severity(tally_target.path)
+        if scope is None:
+            return _tally_findings_by_severity(tally_target.path)
+        log.info(
+            "Trivy findings in the whole scan: %s",
+            _format_tally(_tally_findings_by_severity(tally_target.path)),
+        )
+        return _tally_findings_by_severity(tally_target.path, scope)
     finally:
         # Safe even if the loop above raised before writing the tally
         # file (unlink(missing_ok=True) is a no-op then).
@@ -906,8 +958,15 @@ def _run_trivy(
             tally_target.path.unlink(missing_ok=True)
 
 
-def _tally_findings_by_severity(json_path: Path) -> dict[str, int]:
-    """Read trivy's JSON output and tally findings by severity."""
+def _tally_findings_by_severity(
+    json_path: Path, scope: _ChangedScope | None = None
+) -> dict[str, int]:
+    """Read trivy's JSON output and tally findings by severity.
+
+    With a `scope`, only findings in a file it contains are counted. A
+    finding's file is its own `FilePath` (license findings carry one),
+    else its result's `Target`.
+    """
     try:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
@@ -929,9 +988,21 @@ def _tally_findings_by_severity(json_path: Path) -> dict[str, int]:
             for finding in result.get(key) or []:
                 if not isinstance(finding, dict):
                     continue
+                path = _report_path(finding.get("FilePath") or result.get("Target"))
+                if scope is not None and not scope.contains(path):
+                    continue
                 sev = str(finding.get("Severity") or "UNKNOWN").upper()
                 counts[sev] = counts.get(sev, 0) + 1
     return counts
+
+
+def _format_tally(counts: Mapping[str, int]) -> str:
+    """Render a severity tally, e.g. `LOW=0, MEDIUM=1, HIGH=2, CRITICAL=0`."""
+    summary = ", ".join(f"{sev}={counts.get(sev, 0)}" for sev in _SEVERITY_ORDER)
+    extra = {sev: n for sev, n in counts.items() if sev not in _SEVERITY_ORDER and n}
+    if extra:
+        summary += ", " + ", ".join(f"{sev}={n}" for sev, n in extra.items())
+    return summary
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -980,9 +1051,10 @@ def build_parser() -> argparse.ArgumentParser:
             "dependency-manifest / IaC / container file changed in the "
             "calling event, and otherwise scans the entire --source-dir "
             "(trivy's filesystem scanner needs the whole subtree to "
-            "resolve transitive deps and cross-file IaC references, so "
-            "we don't try to feed individual changed files). 'all' "
-            "always scans --source-dir recursively."
+            "resolve transitive deps and cross-file IaC references) but "
+            "fails only on findings in the changed files' directories. "
+            "'all' always scans --source-dir recursively and fails on "
+            "any finding."
         ),
     )
     p.add_argument(
@@ -1173,6 +1245,7 @@ def main(argv: list[str]) -> int:
     nothing_to_scan = (
         untrusted_build or not image_changed or (files is not None and not files)
     )
+    scope: _ChangedScope | None = None
     if untrusted_build:
         message = (
             f"{image} uses build commands, which do not run on pull requests "
@@ -1190,13 +1263,14 @@ def main(argv: list[str]) -> int:
         )
     elif files is None:
         log.info(
-            "Trivy scope: recursive scan of %s (no usable diff range)",
+            "Trivy scope: recursive scan of %s, gating on every finding",
             source_dir,
         )
     elif files:
+        scope = _ChangedScope.from_files(source_dir, files)
         log.info(
-            "Trivy scope: recursive scan of %s "
-            "(%d audited file(s) changed in the event)",
+            "Trivy scope: recursive scan of %s, gating on findings in the "
+            "%d changed audited file(s) and their directories",
             source_dir,
             len(files),
         )
@@ -1245,6 +1319,7 @@ def main(argv: list[str]) -> int:
             ignore_path=ignore_path,
             scan_type=args.scan_type,
             image=image,
+            scope=scope,
         )
         # Set outputs only after a successful run, gated on the report
         # actually existing on disk: the workflow's upload steps run with
@@ -1276,11 +1351,11 @@ def main(argv: list[str]) -> int:
     threshold = args.severity_threshold.upper()
     threshold_idx = _SEVERITY_ORDER.index(threshold)
     failing = sum(counts[sev] for sev in _SEVERITY_ORDER[threshold_idx:])
-    summary = ", ".join(f"{sev}={counts[sev]}" for sev in _SEVERITY_ORDER)
-    extra = {sev: n for sev, n in counts.items() if sev not in _SEVERITY_ORDER and n}
-    if extra:
-        summary += ", " + ", ".join(f"{sev}={n}" for sev, n in extra.items())
-    log.info("Trivy findings: %s", summary)
+    log.info(
+        "Trivy findings%s: %s",
+        "" if scope is None else " in the changed files' directories",
+        _format_tally(counts),
+    )
 
     _emit_non_sarif_reports(non_sarif, gha_append_step_summary)
 
