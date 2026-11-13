@@ -274,7 +274,9 @@ own regularly updated vulnerability, policy and license databases.
   root. With them, the commands run in bash from the repository root in
   place of that build, with `SCANNER_TRIVY_IMAGE` and
   `SCANNER_TRIVY_DOCKERFILE` set, and must leave `SCANNER_TRIVY_IMAGE`
-  in the local Docker image store.
+  in the local Docker image store. They run on the runner itself, so
+  on a pull request from another repository the image is skipped with a
+  warning; it is scanned by push and scheduled runs.
 
 - With `scan_mode: changed`, an image is built and scanned only when the
   calling event changed one of its inputs: its Dockerfile, the

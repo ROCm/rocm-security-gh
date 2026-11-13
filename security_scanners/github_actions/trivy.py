@@ -19,7 +19,8 @@ image: `--dockerfile` names its Dockerfile and `--image` the local tag.
 The image is built with `docker build` from the checkout root, or by
 `--build-commands` when given, which must produce `--image`. In 'changed'
 mode the build and scan run only when the calling event changed one of
-the image's inputs or the Trivy config/ignore file.
+the image's inputs or the Trivy config/ignore file. An image with
+`--build-commands` is skipped on pull requests from other repositories.
 
 Default scanners are `misconfig,vuln,license`; `secret` is omitted
 because gitleaks already covers secret detection.
@@ -390,14 +391,37 @@ def _resolve_config_path(checkout_root: Path, configured_path: str = "") -> str:
     )
 
 
-def _event_str(event: Mapping[str, object], *keys: str) -> str:
-    """Return the nested string at `event[keys[0]][keys[1]]...`, or `""`."""
+_PULL_REQUEST_EVENTS = frozenset({"pull_request", "pull_request_target"})
+
+
+def _event_value(event: Mapping[str, object], *keys: str) -> object:
+    """Return the nested value at `event[keys[0]][keys[1]]...`, or `None`."""
     current: object = event
     for key in keys:
         if not isinstance(current, Mapping):
-            return ""
+            return None
         current = current.get(key)
-    return current if isinstance(current, str) else ""
+    return current
+
+
+def _event_str(event: Mapping[str, object], *keys: str) -> str:
+    """Return the nested string at `event[keys[0]][keys[1]]...`, or `""`."""
+    value = _event_value(event, *keys)
+    return value if isinstance(value, str) else ""
+
+
+def _is_untrusted_pull_request(event: Mapping[str, object]) -> bool:
+    """Return whether a pull request's head is outside its base repository.
+
+    A missing head repository, as for a deleted fork, counts as untrusted.
+    """
+    head_id = _event_value(event, "pull_request", "head", "repo", "id")
+    base_id = _event_value(event, "pull_request", "base", "repo", "id")
+    if isinstance(head_id, int) and isinstance(base_id, int):
+        return head_id != base_id
+    head = _event_str(event, "pull_request", "head", "repo", "full_name").lower()
+    base = _event_str(event, "pull_request", "base", "repo", "full_name").lower()
+    return not head or head != base
 
 
 def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str] | None:
@@ -407,7 +431,7 @@ def _diff_range(event_name: str, event: Mapping[str, object]) -> tuple[str, str]
     schedule, new ref push, missing SHAs, etc.) and instructs callers
     to fall back to a full scan.
     """
-    if event_name in ("pull_request", "pull_request_target"):
+    if event_name in _PULL_REQUEST_EVENTS:
         base = _event_str(event, "pull_request", "base", "sha")
         head = _event_str(event, "pull_request", "head", "sha")
         if not base or not head:
@@ -932,8 +956,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("SCANNER_TRIVY_DOCKERFILE", ""),
         help=(
             "Dockerfile path relative to --checkout-root for --scan-type "
-            "image. In 'changed' mode the image is built and scanned only "
-            "when this file, or the Trivy config/ignore file, changed."
+            "image. In 'changed' mode the image is built and scanned when "
+            "this file, one of its local COPY/ADD sources, or the Trivy "
+            "config/ignore file changed."
         ),
     )
     p.add_argument(
@@ -942,7 +967,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Bash commands that build --image in place of `docker build "
             "--file <dockerfile> --tag <image> .`, run from --checkout-root "
-            "with SCANNER_TRIVY_IMAGE and SCANNER_TRIVY_DOCKERFILE set."
+            "with SCANNER_TRIVY_IMAGE and SCANNER_TRIVY_DOCKERFILE set. "
+            "The image is skipped on pull requests from other repositories."
         ),
     )
     p.add_argument(
@@ -1038,6 +1064,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(message)s")
     args = build_parser().parse_args(argv)
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    event_payload: Mapping[str, object] | None = None
+
+    def _load_event_payload() -> Mapping[str, object]:
+        nonlocal event_payload
+        if event_payload is None:
+            event_payload = gha_load_github_event()
+        return event_payload
 
     try:
         targets = _parse_report_formats(args.report_formats)
@@ -1078,6 +1112,14 @@ def main(argv: list[str]) -> int:
     checkout_root = Path(args.checkout_root)
 
     try:
+        # Build commands run on the runner itself, so they never run
+        # against code from another repository.
+        untrusted_build = (
+            image_mode
+            and bool(build_commands)
+            and event_name in _PULL_REQUEST_EVENTS
+            and _is_untrusted_pull_request(_load_event_payload())
+        )
         config_paths = (
             *scanner_config_paths(
                 checkout_root=checkout_root,
@@ -1102,35 +1144,43 @@ def main(argv: list[str]) -> int:
             if image_mode
             else None
         )
-        # Only 'changed' mode needs the event payload, to work out the
-        # diff range. Loading it unconditionally would make 'all' mode
-        # fail on events that have no payload we can parse, even though
-        # it never looks at one.
+        # The payload is loaded only when needed, so 'all' mode works on
+        # events without one we can parse.
         files: list[Path] | None = None
         image_changed = True
-        if args.scan_mode == "changed" and dockerfile_path is not None:
-            image_changed = _dockerfile_changed(
-                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-                event=gha_load_github_event(),
-                dockerfile=dockerfile_path,
-                checkout_root=checkout_root,
-                config_paths=config_paths,
-                build_commands=build_commands,
-            )
-        elif args.scan_mode == "changed":
-            files = _determine_changed_audited_files(
-                event_name=os.environ.get("GITHUB_EVENT_NAME", ""),
-                event=gha_load_github_event(),
-                scan_path=source_dir,
-                checkout_root=checkout_root,
-                config_paths=config_paths,
-            )
+        if args.scan_mode == "changed" and not untrusted_build:
+            if dockerfile_path is not None:
+                image_changed = _dockerfile_changed(
+                    event_name=event_name,
+                    event=_load_event_payload(),
+                    dockerfile=dockerfile_path,
+                    checkout_root=checkout_root,
+                    config_paths=config_paths,
+                    build_commands=build_commands,
+                )
+            else:
+                files = _determine_changed_audited_files(
+                    event_name=event_name,
+                    event=_load_event_payload(),
+                    scan_path=source_dir,
+                    checkout_root=checkout_root,
+                    config_paths=config_paths,
+                )
     except (FileNotFoundError, KeyError, ValueError, RuntimeError) as exc:
         log.error("%s", exc)
         return 2
 
-    nothing_to_scan = not image_changed or (files is not None and not files)
-    if image_mode and image_changed:
+    nothing_to_scan = (
+        untrusted_build or not image_changed or (files is not None and not files)
+    )
+    if untrusted_build:
+        message = (
+            f"{image} uses build commands, which do not run on pull requests "
+            "from other repositories; push and scheduled runs scan it"
+        )
+        log.warning("Trivy scope: %s", message)
+        print(f"::warning title=Trivy image scan skipped::{message}", flush=True)
+    elif image_mode and image_changed:
         log.info("Trivy scope: Docker image %s built from %s", image, args.dockerfile)
     elif image_mode:
         log.info(

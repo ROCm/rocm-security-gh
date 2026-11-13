@@ -1,6 +1,7 @@
 # Copyright Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+from collections.abc import Mapping
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from trivy import (
     _diff_range,
     _dockerfile_changed,
     _dockerfile_sources,
+    _is_untrusted_pull_request,
     _is_audited_path,
     _parse_report_formats,
     _parse_scanners,
@@ -35,6 +37,15 @@ from trivy import (
     get_trivy_binary,
     main,
 )
+
+
+def _pull_request_event(*, head_id: int, base_id: int) -> dict[str, object]:
+    return {
+        "pull_request": {
+            "head": {"repo": {"id": head_id, "full_name": f"owner{head_id}/repo"}},
+            "base": {"repo": {"id": base_id, "full_name": f"owner{base_id}/repo"}},
+        }
+    }
 
 
 class MainTest(unittest.TestCase):
@@ -130,7 +141,13 @@ class MainTest(unittest.TestCase):
         )
 
     def _image_main(
-        self, scan_mode: str, *, dockerfile_changed: bool = True, extra=()
+        self,
+        scan_mode: str,
+        *,
+        dockerfile_changed: bool = True,
+        extra=(),
+        event_name: str = "push",
+        event: Mapping[str, object] | None = None,
     ) -> tuple[int, dict[str, mock.Mock]]:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -139,11 +156,14 @@ class MainTest(unittest.TestCase):
         (root / "docker" / "Dockerfile").write_text("FROM scratch\n", "utf-8")
         counts = {sev: 0 for sev in _SEVERITY_ORDER}
         with (
+            mock.patch.dict(os.environ, {"GITHUB_EVENT_NAME": event_name}),
             mock.patch("trivy.gha_append_step_summary"),
             mock.patch("trivy.gha_set_output") as set_output,
             mock.patch("trivy._resolve_config_path", return_value="trivy.yaml"),
             mock.patch("trivy.get_trivy_binary", return_value=Path("trivy")),
-            mock.patch("trivy.gha_load_github_event", return_value={}) as load_event,
+            mock.patch(
+                "trivy.gha_load_github_event", return_value=event or {}
+            ) as load_event,
             mock.patch(
                 "trivy._dockerfile_changed", return_value=dockerfile_changed
             ) as changed,
@@ -235,6 +255,70 @@ class MainTest(unittest.TestCase):
         self.assertEqual(
             mocks["build_image"].call_args.kwargs["build_commands"], "make image"
         )
+
+    def test_untrusted_pull_request_skips_an_image_with_build_commands(self):
+        with mock.patch("builtins.print") as printed:
+            rc, mocks = self._image_main(
+                "all",
+                extra=("--build-commands", "make image"),
+                event_name="pull_request",
+                event=_pull_request_event(head_id=2, base_id=1),
+            )
+
+        self.assertEqual(rc, 0)
+        mocks["build_image"].assert_not_called()
+        mocks["run_trivy"].assert_not_called()
+        mocks["set_output"].assert_called_once_with(
+            {"sarif_path": "", "non_sarif_paths": ""}
+        )
+        self.assertIn(
+            "::warning title=Trivy image scan skipped::", printed.call_args.args[0]
+        )
+
+    def test_untrusted_pull_request_target_skips_build_commands(self):
+        rc, mocks = self._image_main(
+            "changed",
+            extra=("--build-commands", "make image"),
+            event_name="pull_request_target",
+            event=_pull_request_event(head_id=2, base_id=1),
+        )
+
+        self.assertEqual(rc, 0)
+        mocks["changed"].assert_not_called()
+        mocks["build_image"].assert_not_called()
+
+    def test_untrusted_pull_request_still_builds_without_build_commands(self):
+        rc, mocks = self._image_main(
+            "all",
+            event_name="pull_request",
+            event=_pull_request_event(head_id=2, base_id=1),
+        )
+
+        self.assertEqual(rc, 0)
+        mocks["build_image"].assert_called_once()
+        mocks["load_event"].assert_not_called()
+
+    def test_same_repository_pull_request_runs_build_commands(self):
+        rc, mocks = self._image_main(
+            "all",
+            extra=("--build-commands", "make image"),
+            event_name="pull_request",
+            event=_pull_request_event(head_id=1, base_id=1),
+        )
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            mocks["build_image"].call_args.kwargs["build_commands"], "make image"
+        )
+
+    def test_build_commands_outside_pull_requests_need_no_event(self):
+        rc, mocks = self._image_main(
+            "all", extra=("--build-commands", "make image"), event_name=""
+        )
+
+        self.assertEqual(rc, 0)
+        mocks["load_event"].assert_not_called()
+        mocks["build_image"].assert_called_once()
 
     def test_image_mode_rejects_a_missing_dockerfile(self):
         with mock.patch("trivy.get_trivy_binary") as get_binary:
@@ -894,6 +978,41 @@ class DiffRangeTest(unittest.TestCase):
 
     def test_unknown_event_returns_none(self):
         self.assertIsNone(_diff_range("workflow_dispatch", {}))
+
+
+class UntrustedPullRequestTest(unittest.TestCase):
+    """Tests for `_is_untrusted_pull_request`."""
+
+    def test_a_head_in_another_repository_is_untrusted(self):
+        self.assertTrue(
+            _is_untrusted_pull_request(_pull_request_event(head_id=2, base_id=1))
+        )
+
+    def test_a_head_in_the_base_repository_is_trusted(self):
+        self.assertFalse(
+            _is_untrusted_pull_request(_pull_request_event(head_id=1, base_id=1))
+        )
+
+    def test_a_deleted_head_repository_is_untrusted(self):
+        event = {
+            "pull_request": {
+                "head": {"repo": None},
+                "base": {"repo": {"id": 1, "full_name": "ROCm/repo"}},
+            }
+        }
+        self.assertTrue(_is_untrusted_pull_request(event))
+
+    def test_names_are_compared_without_ids(self):
+        def event(head: str) -> dict[str, object]:
+            return {
+                "pull_request": {
+                    "head": {"repo": {"full_name": head}},
+                    "base": {"repo": {"full_name": "ROCm/repo"}},
+                }
+            }
+
+        self.assertFalse(_is_untrusted_pull_request(event("rocm/REPO")))
+        self.assertTrue(_is_untrusted_pull_request(event("contributor/repo")))
 
 
 class IsAuditedPathTest(unittest.TestCase):

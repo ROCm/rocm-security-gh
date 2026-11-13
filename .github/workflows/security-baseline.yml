@@ -108,8 +108,10 @@ on:
           'name' for its check run, a local 'image' tag, and
           'build_commands' that replace 'docker build --file <dockerfile>
           --tag <image> .' and must produce that tag. In 'changed' mode an
-          image is built and scanned only when its Dockerfile or the
-          Trivy config changed.
+          image is built and scanned only when its Dockerfile, one of its
+          local COPY/ADD sources, or the Trivy config/ignore file changed.
+          An image with build_commands is skipped on pull requests from
+          other repositories.
         required: false
         type: string
         default: ""
