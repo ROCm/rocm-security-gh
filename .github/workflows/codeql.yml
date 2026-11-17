@@ -115,7 +115,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          queries: security-extended
+          queries: +security-extended
           config-file: ${{ needs.plan.outputs.config_path }}
 
       - name: Perform CodeQL Analysis

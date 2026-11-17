@@ -861,6 +861,44 @@ class MainTest(unittest.TestCase):
             self._outputs()["config_path"], ".github/codeql/codeql-config.yml"
         )
 
+    def test_a_local_query_change_analyses_every_discovered_language(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql(".github/codeql/codeql-config.yml")
+        api = FakeApi(
+            languages={"C++": 1, "Python": 1},
+            tree=_tree(["src/a.cpp", "tools/b.py"]),
+            pull_files=[
+                [{"filename": ".github/codeql/local-queries/CleartextLogging.ql"}]
+            ],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_languages"], "actions,c-cpp,python")
+
+    def test_a_sibling_directory_of_the_codeql_config_does_not_widen(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql(".github/codeql/codeql-config.yml")
+        api = FakeApi(
+            languages={"Python": 1},
+            tree=_tree(["tools/b.py"]),
+            pull_files=[[{"filename": ".github/codeql-notes/README.md"}]],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["enabled"], "false")
+
+    def test_a_root_codeql_config_widens_only_for_itself(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql("codeql.yml")
+        api = FakeApi(
+            languages={"Python": 1},
+            tree=_tree(["tools/b.py"]),
+            pull_files=[[{"filename": "README.md"}]],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["enabled"], "false")
+
     def test_an_unchanged_codeql_config_does_not_widen_a_pull_request(self):
         self._with_pull_request()
         self._env["SCANNER_SCAN_MODE"] = "changed"

@@ -292,10 +292,18 @@ dangerous sink several functions away from where it entered.
   same references and can scope an exception to one repository
   (`ROCm/TheRock/*: ref-pin` in the zizmor config), which CodeQL's query
   cannot: it trusts a whole owner or nothing. A repository that passes its
-  own `codeql_config_path` gets exactly that config, so it excludes the
-  query itself with
+  own `codeql_config_path` gets `security-extended` plus that config, not
+  the baseline's exclusion, so it excludes the query itself with
   `query-filters: [{exclude: {id: actions/unpinned-tag}}]` if it wants the
   same behavior.
+- The config's `queries:` and `packs:` run in addition to
+  `security-extended`, never instead of it; `query-filters` and
+  `paths-ignore` still apply. A query committed to the repository is
+  referenced as `- uses: ./.github/codeql/<pack>/<Query>.ql` and resolves
+  its dependencies from the CodeQL bundle, so it needs no registry. To
+  replace a suite query with a local variant, give the variant its own
+  `@id` and exclude the original by id: a filter on a shared id would drop
+  both.
 - Private repositories skip CodeQL by baseline policy, even when GitHub Code
   Security is licensed there. The planning and `complete` jobs still succeed
   and report that CodeQL was intentionally disabled; the other scanners
@@ -314,9 +322,12 @@ paths-ignore:
 ```
 
 and pass that file as `codeql_config_path`. The config path is checked after
-the scan target is checked out, before CodeQL initializes. Changing the file
-in a pull request widens changed-mode planning to every discovered language
-so the new analysis scope is exercised immediately.
+the scan target is checked out, before CodeQL initializes. Changing the file,
+or any file in its directory or below it, in a pull request widens
+changed-mode planning to every discovered language so the new analysis scope
+is exercised immediately. Keep local queries under the config's directory so
+that editing one gets the same treatment. A config at the repository root
+widens planning only when the config file itself changes.
 
 **Languages are discovered per run, never configured.** A hard-coded
 language list is wrong as soon as a repository grows a language, and

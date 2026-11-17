@@ -576,6 +576,24 @@ def _normalize_config_path(config_path: str) -> str:
     return path.as_posix()
 
 
+def _touches_codeql_config(config_path: str, changed_paths: Sequence[str]) -> bool:
+    """Return whether a changed file can alter what the CodeQL config runs.
+
+    The config file and everything beside or below it count, because
+    repository-local queries it references (`uses: ./...`) live there,
+    e.g. `.github/codeql/codeql-config.yml` with queries under
+    `.github/codeql/spur-queries/`. A config at the repository root
+    counts only itself; its directory would be every file.
+    """
+    if config_path in changed_paths:
+        return True
+    config_dir = posixpath.dirname(config_path)
+    if not config_dir:
+        return False
+    prefix = f"{config_dir}/"
+    return any(path.startswith(prefix) for path in changed_paths)
+
+
 def validate_config_path(config_path: str, checkout_root: Path) -> str:
     """Validate and return a CodeQL config path relative to the scan target."""
     normalized = _normalize_config_path(config_path)
@@ -616,8 +634,9 @@ def _changed_files_to_restrict_to(
 
     Only a `changed`-mode pull request narrows anything. A file list
     that couldn't be read narrows nothing -- an API failure has to widen
-    the scan, never shrink it. A CodeQL config change also widens the
-    scan because its paths and query settings apply repository-wide.
+    the scan, never shrink it. A change to the CodeQL config, or to a
+    file in its directory such as a local query, also widens the scan
+    because its paths and query settings apply repository-wide.
     """
     normalized_config_path = _normalize_config_path(config_path)
     number = pull_request_number(event)
@@ -632,8 +651,12 @@ def _changed_files_to_restrict_to(
             print(f"Could not list the pull request's files ({exc})")
             return ChangedFiles(paths=(), complete=False)
 
-    if normalized_config_path and normalized_config_path in changed_files.paths:
-        print("CodeQL config changed; analysing every discovered language")
+    if normalized_config_path and _touches_codeql_config(
+        normalized_config_path, changed_files.paths
+    ):
+        print(
+            "CodeQL config or its queries changed; analysing every discovered language"
+        )
         return None
     return changed_files
 
