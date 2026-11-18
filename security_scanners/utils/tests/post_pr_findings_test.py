@@ -292,6 +292,41 @@ class CollectionAndCoverageTest(unittest.TestCase):
         self.assertIn("no usable", reasons[2])
 
 
+class TargetGateCoverageTest(unittest.TestCase):
+    JOBS_PATH = "/repos/ROCm/example/actions/runs/42/jobs"
+
+    def _reasons(
+        self, conclusion: str, step_conclusion: str, observed: frozenset[str]
+    ) -> list[str]:
+        api = FakeApi()
+        api.keyed[(self.JOBS_PATH, "jobs")] = [
+            {
+                "name": "security / codeql / target hrr results",
+                "conclusion": conclusion,
+                "steps": [
+                    {
+                        "name": "Upload CodeQL target findings",
+                        "conclusion": step_conclusion,
+                    }
+                ],
+            }
+        ]
+        return job_coverage_reasons(api, context(), observed)  # type: ignore[arg-type]
+
+    def test_a_gate_failure_after_the_report_is_not_a_coverage_gap(self):
+        self.assertEqual(self._reasons("failure", "success", frozenset({"codeql"})), [])
+
+    def test_a_failure_before_the_report_is_a_coverage_gap(self):
+        reasons = self._reasons("failure", "skipped", frozenset({"codeql"}))
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("concluded with failure", reasons[0])
+
+    def test_a_report_that_parsed_to_nothing_is_still_noted(self):
+        reasons = self._reasons("failure", "success", frozenset())
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("no usable", reasons[0])
+
+
 class RollupJobCoverageTest(unittest.TestCase):
     def test_failed_rollup_jobs_are_not_coverage_notes(self):
         api = FakeApi()

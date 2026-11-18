@@ -40,6 +40,10 @@ _EXPECTED_SCANNERS = ("bandit", "gitleaks", "trivy", "zizmor")
 #   * "codeql / complete" -- the CodeQL rollup, shown as
 #     "<caller job> / codeql / complete".
 _ROLLUP_JOB_NAMES = ("security scanners", "codeql / complete")
+# The step of a CodeQL target's reporting job that publishes its findings. The
+# job fails after it when the target's `fail_on_findings` gate trips, so a
+# failure of the job once this step succeeded is the gate, not a coverage gap.
+_TARGET_REPORT_STEP = "Upload CodeQL target findings"
 _MAX_ARCHIVE_BYTES = 20 * 1024 * 1024
 _MAX_MEMBER_BYTES = 10 * 1024 * 1024
 _MAX_TOTAL_BYTES = 20 * 1024 * 1024
@@ -531,6 +535,7 @@ def job_coverage_reasons(
         scanner = _job_scanner(name)
         steps = job.get("steps")
         upload_succeeded = False
+        target_report_uploaded = False
         if isinstance(steps, list):
             for step_payload in steps:
                 step = _object(step_payload)
@@ -547,8 +552,13 @@ def job_coverage_reasons(
                     and step_conclusion == "success"
                 ):
                     upload_succeeded = True
+                if step_name == _TARGET_REPORT_STEP and step_conclusion == "success":
+                    upload_succeeded = True
+                    target_report_uploaded = True
         if upload_succeeded and scanner and scanner not in observed_scanners:
             reasons.append(f"{name} uploaded no usable machine-readable report.")
+            continue
+        if target_report_uploaded and scanner in observed_scanners:
             continue
         if conclusion in ("success", "skipped", "neutral", ""):
             continue
