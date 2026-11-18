@@ -45,7 +45,7 @@ jobs:
       matrix: ${{ steps.codeql.outputs.matrix }}
       enabled: ${{ steps.codeql.outputs.enabled }}
       selected_languages: ${{ steps.codeql.outputs.selected_languages }}
-      config_path: ${{ steps.codeql.outputs.config_path }}
+      config: ${{ steps.codeql.outputs.config }}
     steps:
       - name: Checkout security-gh scan tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +65,11 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+
+      - name: Install planner dependencies
+        run: >-
+          python -m pip install --require-hashes --only-binary=:all: --no-deps
+          -r security_scanners/requirements-codeql.txt
 
       - name: Discover CodeQL languages
         id: codeql
@@ -92,31 +97,17 @@ jobs:
         with:
           persist-credentials: false
 
-      # Without a repository config, the baseline's own config applies.
-      # zizmor's `unpinned-uses` audit reports unpinned action and reusable
-      # workflow references, which we don't want to duplicate.
+      # `config` is the baseline's config with the repository's appended
+      # (see build_codeql_config). It is passed inline because the Action
+      # reads `config` or `config-file`, never both. `+` runs the config's
+      # `queries:` in addition to `security-extended`, not instead of it.
       - name: Initialize CodeQL
-        if: needs.plan.outputs.config_path == ''
         uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          queries: security-extended
-          config: |
-            query-filters:
-              - exclude:
-                  id: actions/unpinned-tag
-
-      # The Action ignores `config-file` when `config` is also set, so a
-      # repository that passes its own config owns its query filters.
-      - name: Initialize CodeQL with repository config
-        if: needs.plan.outputs.config_path != ''
-        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: none
-          queries: security-extended
-          config-file: ${{ needs.plan.outputs.config_path }}
+          queries: +security-extended
+          config: ${{ needs.plan.outputs.config }}
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
