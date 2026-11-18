@@ -30,6 +30,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
+import yaml
+
 from security_scanners.utils.compute_scan_matrix import MAX_TIMEOUT_MINUTES
 from security_scanners.utils.github_actions_api import (
     gha_append_step_summary,
@@ -52,6 +54,13 @@ _RETRY_STATUSES = frozenset({500, 502, 503, 504})
 _MAX_FILE_PAGES = 30
 # temp workaround
 MAX_BUILDLESS_CPP_FILES = 1_000
+
+# Query filters every analysis gets. zizmor's `unpinned-uses` audit
+# reports the references `actions/unpinned-tag` does and can scope an
+# exception to one repository, which the CodeQL query cannot.
+BASELINE_QUERY_FILTERS: tuple[Mapping[str, object], ...] = (
+    {"exclude": {"id": "actions/unpinned-tag"}},
+)
 
 # Linguist language name -> CodeQL language, for the languages CodeQL can
 # analyse from source alone.
@@ -621,6 +630,69 @@ def validate_config_path(config_path: str, checkout_root: Path) -> str:
     return normalized
 
 
+def _merge_query_filters(repository_filters: list[object]) -> list[object]:
+    """Return the baseline's query filters combined with the repository's.
+
+    CodeQL applies filters in order: the first one decides whether
+    queries are included or excluded by default, and a later filter
+    overrides an earlier one. The baseline's filters go first, so the
+    repository's can override them. When the repository's list opens
+    with an `include` (only the queries it names), they go after that
+    first filter instead, so the repository's list keeps that meaning.
+    """
+    baseline = [dict(entry) for entry in BASELINE_QUERY_FILTERS]
+    first = repository_filters[0] if repository_filters else None
+    if isinstance(first, Mapping) and "include" in first:
+        return [first, *baseline, *repository_filters[1:]]
+    return [*baseline, *repository_filters]
+
+
+def build_codeql_config(config_path: str, checkout_root: Path) -> str:
+    """Return the CodeQL config the analysis initializes with, as JSON.
+
+    Without a repository config this is the baseline's query filters.
+    With one, it is that config with `query-filters` merged by
+    `_merge_query_filters`; every other key is the repository's.
+    JSON is valid YAML, so the result is passed to the Action's `config`
+    input as is. `config_path` is the value `validate_config_path`
+    returned.
+    """
+    repository: dict[str, object] = {}
+    if config_path:
+        text = (checkout_root / config_path).read_text(encoding="utf-8")
+        try:
+            loaded = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            raise DiscoveryError(
+                f"CodeQL config file {config_path!r} is not valid YAML: {exc}"
+            ) from exc
+        if loaded is None:
+            loaded = {}
+        if not isinstance(loaded, dict):
+            raise DiscoveryError(
+                f"CodeQL config file {config_path!r} must be a YAML mapping"
+            )
+        repository = loaded
+
+    repository_filters = repository.get("query-filters") or []
+    if not isinstance(repository_filters, list):
+        raise DiscoveryError(
+            f"`query-filters` in CodeQL config file {config_path!r} must be a list"
+        )
+    merged = {
+        **repository,
+        "query-filters": _merge_query_filters(repository_filters),
+    }
+    try:
+        return json.dumps(merged, separators=(",", ":"))
+    except TypeError as exc:
+        # e.g. an unquoted date, which YAML reads as a timestamp.
+        raise DiscoveryError(
+            f"CodeQL config file {config_path!r} has a value that is not "
+            f"a string, number, boolean, list or mapping: {exc}"
+        ) from exc
+
+
 def _changed_files_to_restrict_to(
     fetcher: JsonFetcher,
     *,
@@ -676,6 +748,7 @@ def main(argv: Sequence[str]) -> int:
                 "enabled": "false",
                 "selected_languages": "",
                 "config_path": "",
+                "config": "",
                 "skipped_languages": message,
                 "detection_source": DETECTION_PRIVATE_REPOSITORY_POLICY,
                 "tree_truncated": "false",
@@ -725,11 +798,12 @@ def main(argv: Sequence[str]) -> int:
         except (KeyError, FileNotFoundError, ValueError, RuntimeError) as exc:
             print(f"Ignoring unreadable event payload: {exc}")
 
+    checkout_root = Path(os.environ.get("SCANNER_CHECKOUT_ROOT", ".scan-target"))
     try:
         config_path = validate_config_path(
-            os.environ.get("SCANNER_CODEQL_CONFIG_PATH", ""),
-            Path(os.environ.get("SCANNER_CHECKOUT_ROOT", ".scan-target")),
+            os.environ.get("SCANNER_CODEQL_CONFIG_PATH", ""), checkout_root
         )
+        config = build_codeql_config(config_path, checkout_root)
         discovery = discover(fetcher, repo=repo, sha=sha, event=event)
         plan = build_plan(
             discovery,
@@ -765,6 +839,7 @@ def main(argv: Sequence[str]) -> int:
     for warning in plan.warnings:
         print(f"Warning: {warning}")
     print(f"matrix = {matrix}")
+    print(f"CodeQL config = {config}")
 
     gha_set_output(
         {
@@ -772,6 +847,7 @@ def main(argv: Sequence[str]) -> int:
             "enabled": "true" if plan.selected else "false",
             "selected_languages": ",".join(plan.selected),
             "config_path": config_path,
+            "config": config,
             "skipped_languages": ",".join(plan.skipped),
             "detection_source": plan.detection_source,
             "tree_truncated": "true" if plan.tree_truncated else "false",

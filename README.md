@@ -90,7 +90,7 @@ which one won:
 | zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
 | bandit   | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
 | trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `.github/scan_tools_configs/trivy.yml`     |
-| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults, no `actions/unpinned-tag` |
+| CodeQL   | The explicit `codeql_config_path`, appended to the default               | Action defaults, no `actions/unpinned-tag` |
 
 Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
@@ -287,23 +287,29 @@ dangerous sink several functions away from where it entered.
 - `codeql_config_path` passes a config file from the scanned repository to
   CodeQL. Unlike `scan_mode`, its `paths` and `paths-ignore` settings control
   which source files CodeQL puts in its database.
-- Without `codeql_config_path`, CodeQL runs `security-extended` minus the
-  `actions/unpinned-tag` query. zizmor's `unpinned-uses` audit reports the
-  same references and can scope an exception to one repository
-  (`ROCm/TheRock/*: ref-pin` in the zizmor config), which CodeQL's query
-  cannot: it trusts a whole owner or nothing. A repository that passes its
-  own `codeql_config_path` gets `security-extended` plus that config, not
-  the baseline's exclusion, so it excludes the query itself with
-  `query-filters: [{exclude: {id: actions/unpinned-tag}}]` if it wants the
-  same behavior.
-- The config's `queries:` and `packs:` run in addition to
-  `security-extended`, never instead of it; `query-filters` and
-  `paths-ignore` still apply. A query committed to the repository is
-  referenced as `- uses: ./.github/codeql/<pack>/<Query>.ql` and resolves
-  its dependencies from the CodeQL bundle, so it needs no registry. To
-  replace a suite query with a local variant, give the variant its own
-  `@id` and exclude the original by id: a filter on a shared id would drop
-  both.
+- CodeQL runs `security-extended` with the baseline's config: a query
+  filter that excludes `actions/unpinned-tag`. zizmor's `unpinned-uses`
+  audit reports the same references and can scope an exception to one
+  repository (`ROCm/TheRock/*: ref-pin` in the zizmor config), which
+  CodeQL's query cannot: it trusts a whole owner or nothing.
+- A `codeql_config_path` config is appended to the baseline's, never
+  substituted for it:
+  - Its `queries:` and `packs:` run in addition to `security-extended`;
+    nothing in it removes the suite.
+  - Its `query-filters` follow the baseline's, so they can override them,
+    e.g. `- include: {id: actions/unpinned-tag}` turns that query back on.
+    If its list opens with an `include` (only the queries it names), that
+    filter stays first so the list keeps that meaning.
+  - Every other key, such as `paths-ignore`, is the repository's.
+- A query committed to the repository is referenced as
+  `- uses: ./.github/codeql/<pack>/<Query>.ql` and resolves its
+  dependencies from the CodeQL bundle, so it needs no registry. To replace
+  a suite query with a local variant, give the variant its own `@id` and
+  exclude the original by id: a filter on a shared id would drop both.
+- The plan job reads the config with PyYAML and hands the merged result to
+  the Action as JSON. A file that is not a YAML mapping, has a
+  `query-filters` that is not a list, or holds a value JSON cannot (an
+  unquoted date, say) fails planning, and no CodeQL job runs.
 - Private repositories skip CodeQL by baseline policy, even when GitHub Code
   Security is licensed there. The planning and `complete` jobs still succeed
   and report that CodeQL was intentionally disabled; the other scanners
