@@ -21,16 +21,21 @@ from security_scanners.utils.compute_codeql_matrix import (
     CodeqlPlan,
     Discovery,
     DiscoveryError,
+    TargetPlan,
     _github_get,
     build_plan,
     count_cpp_files,
+    count_scope_cpp_files,
     discover,
     languages_from_paths,
     main,
+    plan_targets,
     render_summary,
+    render_targets_summary,
     resolve_timeout,
     touches_actions,
 )
+from security_scanners.utils.codeql_targets import CodeqlTarget, TargetsError
 
 
 def _tree(paths: list[str], truncated: bool = False) -> dict[str, object]:
@@ -49,10 +54,13 @@ class FakeApi:
         languages: dict[str, int] | None = None,
         tree: dict[str, object] | None = None,
         pull_files: list[list[dict[str, str]]] | None = None,
+        subtrees: dict[str, dict[str, object]] | None = None,
     ):
         self._languages = languages
         self._tree = tree
         self._pull_files = pull_files or []
+        # Directory -> its tree. A directory that isn't here is a 404.
+        self._subtrees = subtrees or {}
         self.paths_requested: list[str] = []
 
     def __call__(self, path: str) -> object:
@@ -62,6 +70,12 @@ class FakeApi:
                 raise DiscoveryError("languages unavailable")
             return self._languages
         if "/git/trees/" in path:
+            ref = path.split("/git/trees/", 1)[1].split("?", 1)[0]
+            if ":" in ref:
+                directory = ref.split(":", 1)[1]
+                if directory not in self._subtrees:
+                    raise HTTPError(path, 404, "Not Found", None, None)  # type: ignore[arg-type]
+                return self._subtrees[directory]
             if self._tree is None:
                 raise DiscoveryError("tree unavailable")
             return self._tree
@@ -405,6 +419,47 @@ class BuildPlanTest(unittest.TestCase):
             plan.selected,
             ("actions", "c-cpp", "javascript-typescript", "python", "ruby"),
         )
+
+
+class ManuallyBuiltLanguageTest(unittest.TestCase):
+    def _discovery(self, count: int = 3) -> Discovery:
+        return Discovery(
+            linguist_languages=("C++", "Python"),
+            linguist_available=True,
+            paths=tuple(_cpp("src", count) + ["tool.py"]),
+            path_source="exact-tree",
+        )
+
+    def test_a_manually_built_language_is_left_out_and_says_so(self):
+        plan = build_plan(self._discovery(), manually_built=frozenset({"c-cpp"}))
+        self.assertEqual(plan.selected, ("actions", "python"))
+        self.assertEqual(plan.skipped, ("c-cpp (analysed by its manual build)",))
+
+    def test_the_file_limit_does_not_apply_to_a_language_it_no_longer_scans(self):
+        plan = build_plan(
+            self._discovery(MAX_BUILDLESS_CPP_FILES + 1),
+            manually_built=frozenset({"c-cpp"}),
+        )
+        self.assertEqual(plan.skipped, ("c-cpp (analysed by its manual build)",))
+
+    def test_a_language_the_repository_lacks_is_not_mentioned(self):
+        discovery = Discovery(
+            linguist_languages=("Python",),
+            linguist_available=True,
+            paths=("tool.py",),
+            path_source="exact-tree",
+        )
+        plan = build_plan(discovery, manually_built=frozenset({"c-cpp"}))
+        self.assertEqual(plan.skipped, ())
+
+    def test_a_pull_request_note_does_not_contradict_the_manual_build(self):
+        plan = build_plan(
+            self._discovery(),
+            restrict_to=ChangedFiles(("tool.py",)),
+            manually_built=frozenset({"c-cpp"}),
+        )
+        self.assertIn("c-cpp (analysed by its manual build)", plan.skipped)
+        self.assertFalse([n for n in plan.skipped if n.startswith("c-cpp (not")])
 
 
 class ChangedModeRestrictionTest(unittest.TestCase):
@@ -904,6 +959,695 @@ class MainTest(unittest.TestCase):
     def test_takes_no_arguments_so_callers_cannot_select_languages(self):
         with mock.patch.dict(os.environ, self._env, clear=False):
             self.assertEqual(main(["--languages", "python"]), 2)
+
+
+def _exact(paths: list[str]) -> Discovery:
+    return Discovery(
+        linguist_languages=("C++",),
+        linguist_available=True,
+        paths=tuple(paths),
+        path_source="exact-tree",
+    )
+
+
+def _truncated() -> Discovery:
+    return Discovery(
+        linguist_languages=("C++",),
+        linguist_available=True,
+        tree_truncated=True,
+    )
+
+
+def _target(name: str = "app", **overrides: object) -> CodeqlTarget:
+    fields: dict[str, object] = {
+        "name": name,
+        "language": "c-cpp",
+        "scope": ("src/app",),
+        "build_command": "make",
+    }
+    fields.update(overrides)
+    return CodeqlTarget(**fields)  # type: ignore[arg-type]
+
+
+def _cpp(directory: str, count: int) -> list[str]:
+    return [f"{directory}/f{i}.cpp" for i in range(count)]
+
+
+class CountScopeCppFilesTest(unittest.TestCase):
+    """Tests for counting the files a target would build."""
+
+    def test_the_exact_tree_is_counted_under_the_scope_only(self):
+        discovery = _exact(
+            _cpp("src/app", 3)
+            + _cpp("src/app_other", 5)
+            + _cpp("src/lib", 7)
+            + ["src/app/README.md", "src/app/kernel.cu"]
+        )
+        api = FakeApi()
+        self.assertEqual(
+            count_scope_cpp_files(
+                api, repo="o/r", sha="abc", discovery=discovery, scope=["src/app"]
+            ),
+            3,
+        )
+        self.assertEqual(api.paths_requested, [])
+
+    def test_nested_and_repeated_scopes_are_counted_once(self):
+        discovery = _exact(_cpp("a", 2) + _cpp("a/b", 3))
+        self.assertEqual(
+            count_scope_cpp_files(
+                FakeApi(),
+                repo="o/r",
+                sha="abc",
+                discovery=discovery,
+                scope=["a", "a/b", "a"],
+            ),
+            5,
+        )
+
+    def test_a_truncated_tree_reads_each_scope_directory(self):
+        api = FakeApi(
+            subtrees={
+                "src/app": _tree(_cpp("src", 4) + ["README.md"]),
+                "tools": _tree(_cpp("t", 2)),
+            }
+        )
+        self.assertEqual(
+            count_scope_cpp_files(
+                api,
+                repo="o/r",
+                sha="abc",
+                discovery=_truncated(),
+                scope=["src/app", "tools"],
+            ),
+            6,
+        )
+        self.assertEqual(
+            sorted(api.paths_requested),
+            [
+                "/repos/o/r/git/trees/abc:src/app?recursive=1",
+                "/repos/o/r/git/trees/abc:tools?recursive=1",
+            ],
+        )
+
+    def test_a_scope_directory_that_does_not_exist_is_an_error(self):
+        with self.assertRaisesRegex(TargetsError, "'gone' has no files"):
+            count_scope_cpp_files(
+                FakeApi(),
+                repo="o/r",
+                sha="abc",
+                discovery=_truncated(),
+                scope=["gone"],
+            )
+
+    def test_an_empty_subtree_is_an_error(self):
+        api = FakeApi(subtrees={"gone": _tree([])})
+        with self.assertRaises(TargetsError):
+            count_scope_cpp_files(
+                api, repo="o/r", sha="abc", discovery=_truncated(), scope=["gone"]
+            )
+
+    def test_an_exact_tree_without_the_scope_directory_is_an_error(self):
+        discovery = _exact(_cpp("src/app", 3))
+        with self.assertRaisesRegex(TargetsError, "'srcc/typo' has no files"):
+            count_scope_cpp_files(
+                FakeApi(),
+                repo="o/r",
+                sha="abc",
+                discovery=discovery,
+                scope=["src/app", "srcc/typo"],
+            )
+
+    def test_a_scope_directory_without_c_cpp_files_counts_zero(self):
+        discovery = _exact(["src/app/README.md"])
+        self.assertEqual(
+            count_scope_cpp_files(
+                FakeApi(),
+                repo="o/r",
+                sha="abc",
+                discovery=discovery,
+                scope=["src/app"],
+            ),
+            0,
+        )
+
+    def test_a_truncated_scope_directory_cannot_be_counted(self):
+        api = FakeApi(subtrees={"big": _tree(_cpp("x", 3), truncated=True)})
+        self.assertIsNone(
+            count_scope_cpp_files(
+                api, repo="o/r", sha="abc", discovery=_truncated(), scope=["big"]
+            )
+        )
+
+    def test_the_whole_repository_cannot_be_counted_without_its_tree(self):
+        self.assertIsNone(
+            count_scope_cpp_files(
+                FakeApi(), repo="o/r", sha="abc", discovery=_truncated(), scope=["."]
+            )
+        )
+
+    def test_a_failed_lookup_is_unknown_not_empty(self):
+        class Failing:
+            def __call__(self, path: str) -> object:
+                raise HTTPError(path, 500, "boom", None, None)  # type: ignore[arg-type]
+
+        class Broken:
+            def __call__(self, path: str) -> object:
+                raise DiscoveryError("nope")
+
+        for fetcher in (Failing(), Broken()):
+            with self.subTest(fetcher=type(fetcher).__name__):
+                self.assertIsNone(
+                    count_scope_cpp_files(
+                        fetcher,
+                        repo="o/r",
+                        sha="abc",
+                        discovery=_truncated(),
+                        scope=["a"],
+                    )
+                )
+
+
+class PlanTargetsTest(unittest.TestCase):
+    """Tests for choosing which targets run."""
+
+    def _plan(
+        self,
+        targets: list[CodeqlTarget],
+        paths: list[str],
+        *,
+        restrict_to: ChangedFiles | None = None,
+        api: FakeApi | None = None,
+        discovery: Discovery | None = None,
+    ) -> TargetPlan:
+        return plan_targets(
+            targets,
+            fetcher=api or FakeApi(),
+            repo="o/r",
+            sha="abc",
+            discovery=discovery or _exact(paths),
+            restrict_to=restrict_to,
+        )
+
+    def test_a_missing_scope_directory_names_the_target(self):
+        with self.assertRaisesRegex(TargetsError, "target 'app'.*'src/app'"):
+            self._plan([_target()], _cpp("src/other", 3))
+
+    def test_a_target_a_pull_request_does_not_touch_is_not_checked(self):
+        plan = self._plan(
+            [_target()],
+            _cpp("src/other", 3),
+            restrict_to=ChangedFiles(("README.md",)),
+        )
+        self.assertEqual(plan.selected, ())
+
+    def test_a_target_within_the_limit_is_selected(self):
+        plan = self._plan([_target()], _cpp("src/app", 3))
+        self.assertEqual([t.name for t in plan.selected], ["app"])
+        self.assertEqual(plan.skipped, ())
+
+    def test_the_limit_is_counted_over_the_scope_not_the_repository(self):
+        # The point of a target: a repository far over the limit can
+        # still scan the part it names.
+        paths = _cpp("src/app", 10) + _cpp("src/lib", 5 * MAX_BUILDLESS_CPP_FILES)
+        plan = self._plan([_target()], paths)
+        self.assertEqual([t.name for t in plan.selected], ["app"])
+
+    def test_a_scope_at_the_limit_is_selected(self):
+        plan = self._plan([_target()], _cpp("src/app", MAX_BUILDLESS_CPP_FILES))
+        self.assertEqual(len(plan.selected), 1)
+
+    def test_a_scope_over_the_limit_is_skipped_and_says_so(self):
+        plan = self._plan([_target()], _cpp("src/app", MAX_BUILDLESS_CPP_FILES + 1))
+        self.assertEqual(plan.selected, ())
+        self.assertEqual(
+            plan.skipped,
+            (
+                f"app ({MAX_BUILDLESS_CPP_FILES + 1:,} C/C++ files under "
+                f"src/app exceeds the {MAX_BUILDLESS_CPP_FILES:,}-file "
+                "standard-runner limit)",
+            ),
+        )
+
+    def test_a_scope_without_c_cpp_files_is_skipped(self):
+        plan = self._plan([_target()], ["src/app/README.md"] + _cpp("other", 4))
+        self.assertEqual(plan.selected, ())
+        self.assertEqual(plan.skipped, ("app (no C/C++ files under src/app)",))
+
+    def test_an_uncountable_scope_is_skipped_rather_than_assumed_small(self):
+        api = FakeApi(subtrees={"src/app": _tree([], truncated=True)})
+        plan = self._plan([_target()], [], api=api, discovery=_truncated())
+        self.assertEqual(plan.selected, ())
+        self.assertIn("cannot be verified", plan.skipped[0])
+
+    def test_a_truncated_repository_still_scans_a_countable_scope(self):
+        api = FakeApi(subtrees={"src/app": _tree(_cpp("src", 5))})
+        plan = self._plan([_target()], [], api=api, discovery=_truncated())
+        self.assertEqual([t.name for t in plan.selected], ["app"])
+
+    def test_targets_are_judged_one_by_one(self):
+        paths = _cpp("small", 2) + _cpp("big", MAX_BUILDLESS_CPP_FILES + 1)
+        plan = self._plan(
+            [_target("a", scope=("small",)), _target("b", scope=("big",))], paths
+        )
+        self.assertEqual([t.name for t in plan.selected], ["a"])
+        self.assertEqual(len(plan.skipped), 1)
+        self.assertTrue(plan.skipped[0].startswith("b ("))
+
+    def test_a_pull_request_runs_only_the_targets_it_touches(self):
+        paths = _cpp("src/app", 2) + _cpp("tools", 2)
+        targets = [_target("a"), _target("b", scope=("tools",))]
+        plan = self._plan(targets, paths, restrict_to=ChangedFiles(("src/app/f0.cpp",)))
+        self.assertEqual([t.name for t in plan.selected], ["a"])
+        self.assertEqual(plan.skipped, ("b (not touched by this pull request)",))
+
+    def test_a_trigger_path_runs_the_target(self):
+        plan = self._plan(
+            [_target(trigger_paths=(".github/scripts/build.sh",))],
+            _cpp("src/app", 2),
+            restrict_to=ChangedFiles((".github/scripts/build.sh",)),
+        )
+        self.assertEqual(len(plan.selected), 1)
+
+    def test_a_sibling_directory_does_not_trigger_the_target(self):
+        plan = self._plan(
+            [_target()],
+            _cpp("src/app", 2),
+            restrict_to=ChangedFiles(("src/app_other/a.cpp",)),
+        )
+        self.assertEqual(plan.selected, ())
+
+    def test_an_incomplete_file_list_narrows_nothing(self):
+        plan = self._plan(
+            [_target()],
+            _cpp("src/app", 2),
+            restrict_to=ChangedFiles(("README.md",), complete=False),
+        )
+        self.assertEqual(len(plan.selected), 1)
+
+    def test_an_untouched_target_costs_no_api_calls(self):
+        api = FakeApi()
+        self._plan(
+            [_target()],
+            [],
+            restrict_to=ChangedFiles(("README.md",)),
+            api=api,
+            discovery=_truncated(),
+        )
+        self.assertEqual(api.paths_requested, [])
+
+
+class TargetPlanOutputTest(unittest.TestCase):
+    def test_matrix_carries_what_the_job_needs(self):
+        plan = TargetPlan(
+            selected=(
+                _target(
+                    scope=("a", "b"),
+                    container="img@sha256:" + "0" * 64,
+                    build_command="make -j",
+                    fail_on_findings=True,
+                ),
+            )
+        )
+        self.assertEqual(
+            json.loads(plan.matrix(120)),
+            {
+                "include": [
+                    {
+                        "name": "app",
+                        "language": "c-cpp",
+                        "scope": ["a", "b"],
+                        "build_command": "make -j",
+                        "container": "img@sha256:" + "0" * 64,
+                        "sparse_checkout": "",
+                        "timeout_minutes": 120,
+                        "fail_on_findings": True,
+                    }
+                ]
+            },
+        )
+
+    def test_a_target_can_raise_its_budget_but_not_lower_it(self):
+        plan = TargetPlan(
+            selected=(
+                _target("a", timeout_minutes=300),
+                _target("b", timeout_minutes=30),
+            )
+        )
+        budgets = {
+            e["name"]: e["timeout_minutes"]
+            for e in json.loads(plan.matrix(120))["include"]
+        }
+        self.assertEqual(budgets, {"a": 300, "b": 120})
+
+    def test_a_sparse_checkout_lists_the_scope_and_the_extra_directories(self):
+        plan = TargetPlan(
+            selected=(_target(scope=("src/app",), sparse_checkout=("third_party",)),)
+        )
+        (entry,) = json.loads(plan.matrix(120, (".github/codeql",)))["include"]
+        self.assertEqual(
+            entry["sparse_checkout"], ".github/codeql\nsrc/app\nthird_party"
+        )
+
+    def test_nested_sparse_directories_are_listed_once(self):
+        plan = TargetPlan(
+            selected=(_target(scope=("src",), sparse_checkout=("src/app", "lib")),)
+        )
+        (entry,) = json.loads(plan.matrix(120))["include"]
+        self.assertEqual(entry["sparse_checkout"], "lib\nsrc")
+
+    def test_no_targets_is_an_empty_matrix(self):
+        self.assertEqual(json.loads(TargetPlan().matrix(120)), {"include": []})
+
+    def test_summary_lists_selected_and_skipped_targets(self):
+        summary = render_targets_summary(
+            TargetPlan(
+                selected=(_target("a"),), skipped=("b (no C/C++ files under x)",)
+            )
+        )
+        self.assertIn("`a`", summary)
+        self.assertIn("Skipped: b (no C/C++ files under x)", summary)
+        self.assertIn("nothing", render_targets_summary(TargetPlan()))
+
+
+class TargetsMainTest(unittest.TestCase):
+    """Tests for how the step reads the targets file and reports the plan."""
+
+    TARGETS = """
+[[target]]
+name = "app"
+language = "c-cpp"
+scope = ["src/app"]
+build_command = "make"
+trigger_paths = ["build.sh"]
+"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self._output = root / "output"
+        self._summary = root / "summary"
+        self._checkout_root = root / "scan-target"
+        self._checkout_root.mkdir()
+        self._env = {
+            "GITHUB_REPOSITORY": "o/x",
+            "GITHUB_SHA": "abc",
+            "GITHUB_TOKEN": "t0ken",
+            "GITHUB_OUTPUT": str(self._output),
+            "GITHUB_STEP_SUMMARY": str(self._summary),
+            "GITHUB_EVENT_PATH": "",
+            "SCANNER_CHECKOUT_ROOT": str(self._checkout_root),
+            "SCANNER_CODEQL_CONFIG_PATH": "",
+            "SCANNER_CODEQL_TARGETS_PATH": "",
+            "SCANNER_REPOSITORY_PRIVATE": "false",
+            "SCANNER_TIMEOUT_MINUTES": "",
+            "SCANNER_SCAN_MODE": "changed",
+        }
+        self._root = root
+
+    def _configure(self, text: str | None = None, path: str = "targets.toml") -> None:
+        target = self._checkout_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.TARGETS if text is None else text, encoding="utf-8")
+        self._env["SCANNER_CODEQL_TARGETS_PATH"] = path
+
+    def _pull_request(self) -> None:
+        event = self._root / "event.json"
+        event.write_text(json.dumps({"pull_request": {"number": 7}}), encoding="utf-8")
+        self._env["GITHUB_EVENT_PATH"] = str(event)
+
+    def _run(self, api: FakeApi) -> int:
+        with (
+            mock.patch.dict(os.environ, self._env, clear=False),
+            mock.patch(
+                "security_scanners.utils.compute_codeql_matrix._github_get",
+                side_effect=lambda path, **kwargs: api(path),
+            ),
+        ):
+            return main([])
+
+    def _outputs(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        if self._output.is_file():
+            for line in self._output.read_text(encoding="utf-8").splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key] = value
+        return values
+
+    def _api(self, **kwargs: object) -> FakeApi:
+        defaults: dict[str, object] = {
+            "languages": {"C++": 1},
+            "tree": _tree(_cpp("src/app", 3) + ["build.sh"]),
+        }
+        defaults.update(kwargs)
+        return FakeApi(**defaults)  # type: ignore[arg-type]
+
+    def test_without_a_targets_file_there_are_no_targets(self):
+        self.assertEqual(self._run(self._api()), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["targets_enabled"], "false")
+        self.assertEqual(json.loads(outputs["targets_matrix"]), {"include": []})
+        self.assertNotIn("CodeQL targets", self._summary.read_text("utf-8"))
+
+    def test_a_targets_file_produces_a_matrix_and_the_outputs(self):
+        self._configure()
+        self.assertEqual(self._run(self._api()), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["targets_enabled"], "true")
+        self.assertEqual(outputs["selected_targets"], "app")
+        self.assertEqual(outputs["skipped_targets"], "")
+        (entry,) = json.loads(outputs["targets_matrix"])["include"]
+        self.assertEqual(entry["name"], "app")
+        self.assertEqual(entry["scope"], ["src/app"])
+        self.assertEqual(entry["timeout_minutes"], DEFAULT_TIMEOUT_MINUTES)
+        self.assertIn("CodeQL targets", self._summary.read_text("utf-8"))
+
+    def test_targets_do_not_change_the_discovered_languages(self):
+        self._configure()
+        self.assertEqual(self._run(self._api()), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["selected_languages"], "actions,c-cpp")
+
+    def test_a_sparse_target_keeps_the_codeql_config_directory(self):
+        self._configure(self.TARGETS + 'sparse_checkout = ["third_party"]\n')
+        config = self._checkout_root / ".github/codeql/config.yml"
+        config.parent.mkdir(parents=True)
+        config.write_text("paths-ignore: []\n", encoding="utf-8")
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = ".github/codeql/config.yml"
+        self.assertEqual(self._run(self._api()), 0)
+        (entry,) = json.loads(self._outputs()["targets_matrix"])["include"]
+        self.assertEqual(
+            entry["sparse_checkout"], ".github/codeql\nsrc/app\nthird_party"
+        )
+
+    def test_the_callers_timeout_reaches_the_targets(self):
+        self._configure()
+        self._env["SCANNER_TIMEOUT_MINUTES"] = "240"
+        self.assertEqual(self._run(self._api()), 0)
+        (entry,) = json.loads(self._outputs()["targets_matrix"])["include"]
+        self.assertEqual(entry["timeout_minutes"], 240)
+
+    def test_a_large_repository_still_gets_its_scoped_target(self):
+        self._configure()
+        paths = _cpp("src/app", 3) + _cpp("src/lib", 2 * MAX_BUILDLESS_CPP_FILES)
+        api = self._api(tree=_tree(paths))
+        self.assertEqual(self._run(api), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["selected_targets"], "app")
+        self.assertNotIn("c-cpp", outputs["selected_languages"])
+
+    def test_a_truncated_repository_counts_the_scope_directory(self):
+        self._configure()
+        api = self._api(
+            tree=_tree([], truncated=True),
+            pull_files=None,
+            subtrees={"src/app": _tree(_cpp("src", 4))},
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "app")
+
+    def test_a_skipped_target_is_reported(self):
+        self._configure()
+        api = self._api(tree=_tree(_cpp("src/app", MAX_BUILDLESS_CPP_FILES + 1)))
+        self.assertEqual(self._run(api), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["targets_enabled"], "false")
+        self.assertIn("standard-runner limit", outputs["skipped_targets"])
+        self.assertIn("Skipped: app", self._summary.read_text("utf-8"))
+
+    def test_a_pull_request_that_misses_every_target_runs_none(self):
+        self._configure()
+        self._pull_request()
+        api = self._api(pull_files=[[{"filename": "README.md"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["targets_enabled"], "false")
+
+    def test_a_pull_request_touching_the_scope_runs_the_target(self):
+        self._configure()
+        self._pull_request()
+        api = self._api(pull_files=[[{"filename": "src/app/f0.cpp"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "app")
+
+    def test_changing_the_targets_file_runs_every_target(self):
+        self._configure()
+        self._pull_request()
+        api = self._api(pull_files=[[{"filename": "targets.toml"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "app")
+
+    def test_changing_the_codeql_config_runs_every_target(self):
+        self._configure()
+        self._pull_request()
+        config = self._checkout_root / "codeql.yml"
+        config.write_text("paths-ignore: []\n", encoding="utf-8")
+        self._env["SCANNER_CODEQL_CONFIG_PATH"] = "codeql.yml"
+        api = self._api(pull_files=[[{"filename": "codeql.yml"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "app")
+
+    def test_scan_mode_all_runs_every_target(self):
+        self._configure()
+        self._pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "all"
+        api = self._api(pull_files=[[{"filename": "README.md"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "app")
+
+    def _build_inputs(self, **overrides: str) -> None:
+        self._env.update(
+            {
+                "SCANNER_CODEQL_BUILD_MODE": "manual",
+                "SCANNER_CODEQL_BUILD_COMMAND": "make",
+                "SCANNER_CODEQL_SCOPE": "src/app",
+                **overrides,
+            }
+        )
+
+    def test_manual_build_mode_makes_a_target_and_replaces_discovered_c_cpp(self):
+        self._build_inputs(SCANNER_CODEQL_FAIL_ON_FINDINGS="true")
+        self.assertEqual(self._run(self._api()), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["selected_targets"], "c-cpp")
+        self.assertEqual(outputs["selected_languages"], "actions")
+        (entry,) = json.loads(outputs["targets_matrix"])["include"]
+        self.assertEqual(entry["build_command"], "make")
+        self.assertEqual(entry["scope"], ["src/app"])
+        self.assertTrue(entry["fail_on_findings"])
+
+    def test_a_misspelled_scope_fails_the_step(self):
+        self._build_inputs(SCANNER_CODEQL_SCOPE="srcc/app")
+        self.assertEqual(self._run(self._api()), 2)
+        self.assertNotIn("targets_matrix", self._outputs())
+        self.assertIn("'srcc/app' has no files", self._summary.read_text("utf-8"))
+
+    def test_build_inputs_report_their_targets_in_the_summary(self):
+        self._build_inputs()
+        self.assertEqual(self._run(self._api()), 0)
+        self.assertIn("Selected: `c-cpp`", self._summary.read_text("utf-8"))
+
+    def test_a_skipped_build_target_is_explained_in_the_summary(self):
+        self._build_inputs()
+        self._pull_request()
+        api = self._api(pull_files=[[{"filename": "README.md"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertIn(
+            "c-cpp (not touched by this pull request)",
+            self._summary.read_text("utf-8"),
+        )
+
+    def test_manual_build_mode_gates_the_scope_not_the_repository(self):
+        self._build_inputs()
+        paths = _cpp("src/app", 3) + _cpp("src/lib", 2 * MAX_BUILDLESS_CPP_FILES)
+        self.assertEqual(self._run(self._api(tree=_tree(paths))), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "c-cpp")
+
+    def test_manual_build_mode_reports_a_scope_over_the_limit(self):
+        self._build_inputs()
+        paths = _cpp("src/app", MAX_BUILDLESS_CPP_FILES + 1)
+        self.assertEqual(self._run(self._api(tree=_tree(paths))), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["targets_enabled"], "false")
+        self.assertIn("standard-runner limit", outputs["skipped_targets"])
+
+    def test_manual_build_mode_runs_on_a_pull_request_only_when_touched(self):
+        self._build_inputs()
+        self._pull_request()
+        api = self._api(pull_files=[[{"filename": "README.md"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["targets_enabled"], "false")
+
+    def test_a_targets_file_change_does_not_widen_the_manual_build(self):
+        self._build_inputs()
+        self._configure()
+        self._pull_request()
+        api = self._api(pull_files=[[{"filename": "targets.toml"}]])
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "app")
+
+    def test_manual_build_mode_and_a_targets_file_run_together(self):
+        self._build_inputs()
+        self._configure()
+        self.assertEqual(self._run(self._api()), 0)
+        self.assertEqual(self._outputs()["selected_targets"], "c-cpp,app")
+
+    def test_the_targets_file_cannot_take_the_build_inputs_name(self):
+        self._build_inputs()
+        self._configure(self.TARGETS.replace('"app"', '"c-cpp"'))
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_manual_build_mode_without_a_command_fails_the_step(self):
+        self._build_inputs(SCANNER_CODEQL_BUILD_COMMAND="")
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_build_inputs_without_manual_mode_fail_the_step(self):
+        self._env["SCANNER_CODEQL_BUILD_COMMAND"] = "make"
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_a_private_repository_ignores_the_build_inputs(self):
+        self._build_inputs()
+        self._env["SCANNER_REPOSITORY_PRIVATE"] = "true"
+        api = self._api()
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["targets_enabled"], "false")
+        self.assertEqual(api.paths_requested, [])
+
+    def test_a_malformed_targets_file_fails_the_step(self):
+        self._configure("[[target]\n")
+        self.assertEqual(self._run(self._api()), 2)
+        self.assertNotIn("targets_matrix", self._outputs())
+        self.assertIn("Failed", self._summary.read_text("utf-8"))
+
+    def test_a_targets_file_with_an_unknown_key_fails_the_step(self):
+        self._configure(self.TARGETS + "typo = 1\n")
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_a_targets_path_outside_the_repository_is_rejected(self):
+        self._env["SCANNER_CODEQL_TARGETS_PATH"] = "../targets.toml"
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_a_missing_targets_file_is_rejected(self):
+        self._env["SCANNER_CODEQL_TARGETS_PATH"] = "missing.toml"
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_a_targets_file_symlinked_outside_the_repository_is_rejected(self):
+        outside = self._root / "outside.toml"
+        outside.write_text(self.TARGETS, encoding="utf-8")
+        (self._checkout_root / "targets.toml").symlink_to(outside)
+        self._env["SCANNER_CODEQL_TARGETS_PATH"] = "targets.toml"
+        self.assertEqual(self._run(self._api()), 2)
+
+    def test_a_private_repository_runs_no_targets_and_reads_nothing(self):
+        self._env["SCANNER_REPOSITORY_PRIVATE"] = "true"
+        self._env["SCANNER_CODEQL_TARGETS_PATH"] = "missing.toml"
+        api = self._api()
+        self.assertEqual(self._run(api), 0)
+        outputs = self._outputs()
+        self.assertEqual(outputs["targets_enabled"], "false")
+        self.assertEqual(json.loads(outputs["targets_matrix"]), {"include": []})
+        self.assertEqual(api.paths_requested, [])
 
 
 if __name__ == "__main__":
