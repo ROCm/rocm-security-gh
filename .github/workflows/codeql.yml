@@ -45,7 +45,6 @@ jobs:
       matrix: ${{ steps.codeql.outputs.matrix }}
       enabled: ${{ steps.codeql.outputs.enabled }}
       selected_languages: ${{ steps.codeql.outputs.selected_languages }}
-      config_path: ${{ steps.codeql.outputs.config_path }}
       config: ${{ steps.codeql.outputs.config }}
     steps:
       - name: Checkout security-gh scan tooling

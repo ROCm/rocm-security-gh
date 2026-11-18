@@ -295,11 +295,14 @@ dangerous sink several functions away from where it entered.
 - A `codeql_config_path` config is appended to the baseline's, never
   substituted for it:
   - Its `queries:` and `packs:` run in addition to `security-extended`;
-    nothing in it removes the suite.
-  - Its `query-filters` follow the baseline's, so they can override them,
-    e.g. `- include: {id: actions/unpinned-tag}` turns that query back on.
-    If its list opens with an `include` (only the queries it names), that
-    filter stays first so the list keeps that meaning.
+    they cannot replace the suite, though its `query-filters` can still
+    exclude suite queries.
+  - Its `query-filters` follow the baseline's, so they can override them.
+    To turn `actions/unpinned-tag` back on, add
+    `- include: {id: actions/unpinned-tag}` after an `exclude` entry.
+    A list that opens with an `include` keeps its CodeQL meaning, only
+    the queries it names: that first filter is also placed ahead of the
+    baseline's, so it decides the default.
   - Every other key, such as `paths-ignore`, is the repository's.
 - A query committed to the repository is referenced as
   `- uses: ./.github/codeql/<pack>/<Query>.ql` and resolves its
@@ -333,7 +336,9 @@ or any file in its directory or below it, in a pull request widens
 changed-mode planning to every discovered language so the new analysis scope
 is exercised immediately. Keep local queries under the config's directory so
 that editing one gets the same treatment. A config at the repository root
-widens planning only when the config file itself changes.
+widens planning only when the config file itself changes. Give the config a
+directory of its own, such as `.github/codeql/`: a config directly under
+`.github/` widens planning for every workflow change.
 
 **Languages are discovered per run, never configured.** A hard-coded
 language list is wrong as soon as a repository grows a language, and

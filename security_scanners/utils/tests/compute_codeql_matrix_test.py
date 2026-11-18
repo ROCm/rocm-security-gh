@@ -766,9 +766,25 @@ class BuildCodeqlConfigTest(unittest.TestCase):
             [
                 {"include": {"tags contain": "security"}},
                 _BASELINE_FILTER,
+                {"include": {"tags contain": "security"}},
                 {"exclude": {"id": "py/clear-text-logging-sensitive-data"}},
             ],
         )
+
+    def test_a_leading_include_overrides_the_baseline(self):
+        include = {"include": {"id": "actions/unpinned-tag"}}
+        config = self._build(
+            "query-filters:\n  - include:\n      id: actions/unpinned-tag\n"
+        )
+        self.assertEqual(config["query-filters"], [include, _BASELINE_FILTER, include])
+
+    def test_empty_query_filters_get_the_baseline(self):
+        config = self._build("query-filters: []\n")
+        self.assertEqual(config["query-filters"], [_BASELINE_FILTER])
+
+    def test_query_filters_that_are_an_empty_mapping_are_rejected(self):
+        with self.assertRaises(DiscoveryError):
+            self._build("query-filters: {}\n")
 
     def test_invalid_yaml_is_rejected(self):
         with self.assertRaises(DiscoveryError):

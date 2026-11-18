@@ -635,15 +635,19 @@ def _merge_query_filters(repository_filters: list[object]) -> list[object]:
 
     CodeQL applies filters in order: the first one decides whether
     queries are included or excluded by default, and a later filter
-    overrides an earlier one. The baseline's filters go first, so the
-    repository's can override them. When the repository's list opens
-    with an `include` (only the queries it names), they go after that
-    first filter instead, so the repository's list keeps that meaning.
+    overrides an earlier one. The repository's whole list follows the
+    baseline's, so every repository filter can override it. When the
+    repository's list opens with an `include` (only the queries it
+    names), that filter is also placed ahead of the baseline's so it
+    still decides the default; repeating it changes nothing else. E.g.
+    `[{include: {id: actions/unpinned-tag}}]` becomes
+    `[include unpinned-tag, exclude unpinned-tag, include unpinned-tag]`,
+    which runs that query alone.
     """
     baseline = [dict(entry) for entry in BASELINE_QUERY_FILTERS]
     first = repository_filters[0] if repository_filters else None
     if isinstance(first, Mapping) and "include" in first:
-        return [first, *baseline, *repository_filters[1:]]
+        return [first, *baseline, *repository_filters]
     return [*baseline, *repository_filters]
 
 
@@ -674,7 +678,9 @@ def build_codeql_config(config_path: str, checkout_root: Path) -> str:
             )
         repository = loaded
 
-    repository_filters = repository.get("query-filters") or []
+    repository_filters = repository.get("query-filters")
+    if repository_filters is None:
+        repository_filters = []
     if not isinstance(repository_filters, list):
         raise DiscoveryError(
             f"`query-filters` in CodeQL config file {config_path!r} must be a list"
