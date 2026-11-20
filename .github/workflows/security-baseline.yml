@@ -68,7 +68,8 @@ on:
         description: >-
           Optional path to the repository's CodeQL YAML config, relative
           to the repository root. Use it to configure analysis scope,
-          including paths and paths-ignore.
+          including paths and paths-ignore, and to add queries on top of
+          security-extended.
         required: false
         type: string
         default: ""
@@ -216,7 +217,7 @@ jobs:
 
       - name: Upload SARIF report to code scanning
         if: always() && steps.scan.outputs.sarif_path != ''
-        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: ${{ steps.scan.outputs.sarif_path }}
           category: ${{ matrix.scanner }}

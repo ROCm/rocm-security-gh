@@ -22,6 +22,24 @@ A change that adds a scanner or scan target, changes which changes trigger a
 scan or which findings fail a run, or runs code from the scanned repository
 needs an RFC in [`docs/rfcs/`](docs/rfcs/README.md). Open it with the change
 or before it.
+## Changelog
+
+Repositories that call these workflows read [CHANGELOG.md](CHANGELOG.md)
+to learn what a new release changes for them; Dependabot also copies the
+matching section into their version-bump pull requests. Add an entry under
+`## [Unreleased]` in the same pull request when it:
+
+- bumps a scanner (`_*_VERSION` and `checksums.sha256`) or a CodeQL Action
+  pin. List the old and new version, link the upstream release notes of
+  every release in between, and say what a scanned repository will notice:
+  new or removed findings, changed severities, new file types covered.
+- adds or changes a workflow input, a default config, the scan scope or
+  what makes a scan fail.
+- fixes a bug a caller could see.
+
+Refactors, test-only and documentation-only changes need no entry. When a
+release is tagged, rename `Unreleased` to the tag and date, start a new
+empty `Unreleased` section, and update the compare links at the bottom.
 
 ## Code style
 

@@ -22,6 +22,7 @@ from security_scanners.utils.compute_codeql_matrix import (
     Discovery,
     DiscoveryError,
     _github_get,
+    build_codeql_config,
     build_plan,
     count_cpp_files,
     discover,
@@ -697,6 +698,111 @@ class MatrixAndSummaryTest(unittest.TestCase):
         self.assertIn("the commit tree API failed (boom)", summary)
 
 
+_BASELINE_FILTER = {"exclude": {"id": "actions/unpinned-tag"}}
+
+
+class BuildCodeqlConfigTest(unittest.TestCase):
+    """Tests for `build_codeql_config`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._root = Path(self._tmp.name)
+
+    def _build(self, text: str) -> dict[str, object]:
+        (self._root / "codeql.yml").write_text(text, encoding="utf-8")
+        return json.loads(build_codeql_config("codeql.yml", self._root))
+
+    def test_without_a_repository_config_only_the_baseline_applies(self):
+        self.assertEqual(
+            json.loads(build_codeql_config("", self._root)),
+            {"query-filters": [_BASELINE_FILTER]},
+        )
+
+    def test_an_empty_repository_config_gets_the_baseline(self):
+        self.assertEqual(self._build(""), {"query-filters": [_BASELINE_FILTER]})
+
+    def test_the_repository_keys_are_kept(self):
+        config = self._build(
+            "paths-ignore:\n"
+            "  - third_party/**\n"
+            "queries:\n"
+            "  - uses: ./.github/codeql/local-queries/CleartextLogging.ql\n"
+        )
+        self.assertEqual(config["paths-ignore"], ["third_party/**"])
+        self.assertEqual(
+            config["queries"],
+            [{"uses": "./.github/codeql/local-queries/CleartextLogging.ql"}],
+        )
+        self.assertEqual(config["query-filters"], [_BASELINE_FILTER])
+
+    def test_repository_filters_follow_the_baseline_so_they_override_it(self):
+        config = self._build(
+            "query-filters:\n"
+            "  - exclude:\n"
+            "      id: rust/cleartext-logging\n"
+            "  - include:\n"
+            "      id: actions/unpinned-tag\n"
+        )
+        self.assertEqual(
+            config["query-filters"],
+            [
+                _BASELINE_FILTER,
+                {"exclude": {"id": "rust/cleartext-logging"}},
+                {"include": {"id": "actions/unpinned-tag"}},
+            ],
+        )
+
+    def test_a_leading_include_still_decides_the_default(self):
+        config = self._build(
+            "query-filters:\n"
+            "  - include:\n"
+            "      tags contain: security\n"
+            "  - exclude:\n"
+            "      id: py/clear-text-logging-sensitive-data\n"
+        )
+        self.assertEqual(
+            config["query-filters"],
+            [
+                {"include": {"tags contain": "security"}},
+                _BASELINE_FILTER,
+                {"include": {"tags contain": "security"}},
+                {"exclude": {"id": "py/clear-text-logging-sensitive-data"}},
+            ],
+        )
+
+    def test_a_leading_include_overrides_the_baseline(self):
+        include = {"include": {"id": "actions/unpinned-tag"}}
+        config = self._build(
+            "query-filters:\n  - include:\n      id: actions/unpinned-tag\n"
+        )
+        self.assertEqual(config["query-filters"], [include, _BASELINE_FILTER, include])
+
+    def test_empty_query_filters_get_the_baseline(self):
+        config = self._build("query-filters: []\n")
+        self.assertEqual(config["query-filters"], [_BASELINE_FILTER])
+
+    def test_query_filters_that_are_an_empty_mapping_are_rejected(self):
+        with self.assertRaises(DiscoveryError):
+            self._build("query-filters: {}\n")
+
+    def test_invalid_yaml_is_rejected(self):
+        with self.assertRaises(DiscoveryError):
+            self._build("paths-ignore: [unclosed\n")
+
+    def test_a_config_that_is_not_a_mapping_is_rejected(self):
+        with self.assertRaises(DiscoveryError):
+            self._build("- paths-ignore\n")
+
+    def test_query_filters_that_are_not_a_list_are_rejected(self):
+        with self.assertRaises(DiscoveryError):
+            self._build("query-filters:\n  exclude:\n    id: x\n")
+
+    def test_a_value_json_cannot_hold_is_rejected(self):
+        with self.assertRaises(DiscoveryError):
+            self._build("name: 2024-01-01\n")
+
+
 class MainTest(unittest.TestCase):
     """Tests for the step's outputs and exit codes."""
 
@@ -759,6 +865,9 @@ class MainTest(unittest.TestCase):
         self.assertEqual(outputs["detection_source"], DETECTION_LANGUAGES_AND_TREE)
         self.assertEqual(outputs["tree_truncated"], "false")
         self.assertEqual(outputs["config_path"], "")
+        self.assertEqual(
+            json.loads(outputs["config"]), {"query-filters": [_BASELINE_FILTER]}
+        )
         self.assertEqual(
             json.loads(outputs["matrix"])["include"][0],
             {"language": "actions", "timeout_minutes": DEFAULT_TIMEOUT_MINUTES},
@@ -860,6 +969,55 @@ class MainTest(unittest.TestCase):
         self.assertEqual(
             self._outputs()["config_path"], ".github/codeql/codeql-config.yml"
         )
+        self.assertEqual(
+            json.loads(self._outputs()["config"]),
+            {"paths-ignore": [], "query-filters": [_BASELINE_FILTER]},
+        )
+
+    def test_an_invalid_codeql_config_fails_planning(self):
+        self._configure_codeql("codeql.yml")
+        (self._checkout_root / "codeql.yml").write_text("- x\n", encoding="utf-8")
+        api = FakeApi(languages={"Python": 1}, tree=_tree(["tool.py"]))
+        self.assertEqual(self._run(api), 2)
+        self.assertNotIn("matrix", self._outputs())
+
+    def test_a_local_query_change_analyses_every_discovered_language(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql(".github/codeql/codeql-config.yml")
+        api = FakeApi(
+            languages={"C++": 1, "Python": 1},
+            tree=_tree(["src/a.cpp", "tools/b.py"]),
+            pull_files=[
+                [{"filename": ".github/codeql/local-queries/CleartextLogging.ql"}]
+            ],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["selected_languages"], "actions,c-cpp,python")
+
+    def test_a_sibling_directory_of_the_codeql_config_does_not_widen(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql(".github/codeql/codeql-config.yml")
+        api = FakeApi(
+            languages={"Python": 1},
+            tree=_tree(["tools/b.py"]),
+            pull_files=[[{"filename": ".github/codeql-notes/README.md"}]],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["enabled"], "false")
+
+    def test_a_root_codeql_config_widens_only_for_itself(self):
+        self._with_pull_request()
+        self._env["SCANNER_SCAN_MODE"] = "changed"
+        self._configure_codeql("codeql.yml")
+        api = FakeApi(
+            languages={"Python": 1},
+            tree=_tree(["tools/b.py"]),
+            pull_files=[[{"filename": "README.md"}]],
+        )
+        self.assertEqual(self._run(api), 0)
+        self.assertEqual(self._outputs()["enabled"], "false")
 
     def test_an_unchanged_codeql_config_does_not_widen_a_pull_request(self):
         self._with_pull_request()

@@ -90,7 +90,7 @@ which one won:
 | zizmor   | `.github/zizmor.yml`, `.github/zizmor.yaml`, `zizmor.yml`, `zizmor.yaml` | `.github/scan_tools_configs/zizmor.yml`    |
 | bandit   | `bandit.yaml`, `bandit.yml`                                              | `.github/scan_tools_configs/bandit.yml`    |
 | trivy    | `trivy.yaml`, `trivy.yml`, plus `.trivyignore`                           | `.github/scan_tools_configs/trivy.yml`     |
-| CodeQL   | The explicit `codeql_config_path`                                        | Action defaults, no `actions/unpinned-tag` |
+| CodeQL   | The explicit `codeql_config_path`, appended to the default               | Action defaults, no `actions/unpinned-tag` |
 
 Each scanner's candidates are listed in the order that scanner itself
 searches, so the file CI reads is the one a local run of the same tool
@@ -287,15 +287,32 @@ dangerous sink several functions away from where it entered.
 - `codeql_config_path` passes a config file from the scanned repository to
   CodeQL. Unlike `scan_mode`, its `paths` and `paths-ignore` settings control
   which source files CodeQL puts in its database.
-- Without `codeql_config_path`, CodeQL runs `security-extended` minus the
-  `actions/unpinned-tag` query. zizmor's `unpinned-uses` audit reports the
-  same references and can scope an exception to one repository
-  (`ROCm/TheRock/*: ref-pin` in the zizmor config), which CodeQL's query
-  cannot: it trusts a whole owner or nothing. A repository that passes its
-  own `codeql_config_path` gets exactly that config, so it excludes the
-  query itself with
-  `query-filters: [{exclude: {id: actions/unpinned-tag}}]` if it wants the
-  same behavior.
+- CodeQL runs `security-extended` with the baseline's config: a query
+  filter that excludes `actions/unpinned-tag`. zizmor's `unpinned-uses`
+  audit reports the same references and can scope an exception to one
+  repository (`ROCm/TheRock/*: ref-pin` in the zizmor config), which
+  CodeQL's query cannot: it trusts a whole owner or nothing.
+- A `codeql_config_path` config is appended to the baseline's, never
+  substituted for it:
+  - Its `queries:` and `packs:` run in addition to `security-extended`;
+    they cannot replace the suite, though its `query-filters` can still
+    exclude suite queries.
+  - Its `query-filters` follow the baseline's, so they can override them.
+    To turn `actions/unpinned-tag` back on, add
+    `- include: {id: actions/unpinned-tag}` after an `exclude` entry.
+    A list that opens with an `include` keeps its CodeQL meaning, only
+    the queries it names: that first filter is also placed ahead of the
+    baseline's, so it decides the default.
+  - Every other key, such as `paths-ignore`, is the repository's.
+- A query committed to the repository is referenced as
+  `- uses: ./.github/codeql/<pack>/<Query>.ql` and resolves its
+  dependencies from the CodeQL bundle, so it needs no registry. To replace
+  a suite query with a local variant, give the variant its own `@id` and
+  exclude the original by id: a filter on a shared id would drop both.
+- The plan job reads the config with PyYAML and hands the merged result to
+  the Action as JSON. A file that is not a YAML mapping, has a
+  `query-filters` that is not a list, or holds a value JSON cannot (an
+  unquoted date, say) fails planning, and no CodeQL job runs.
 - Private repositories skip CodeQL by baseline policy, even when GitHub Code
   Security is licensed there. The planning and `complete` jobs still succeed
   and report that CodeQL was intentionally disabled; the other scanners
@@ -314,9 +331,14 @@ paths-ignore:
 ```
 
 and pass that file as `codeql_config_path`. The config path is checked after
-the scan target is checked out, before CodeQL initializes. Changing the file
-in a pull request widens changed-mode planning to every discovered language
-so the new analysis scope is exercised immediately.
+the scan target is checked out, before CodeQL initializes. Changing the file,
+or any file in its directory or below it, in a pull request widens
+changed-mode planning to every discovered language so the new analysis scope
+is exercised immediately. Keep local queries under the config's directory so
+that editing one gets the same treatment. A config at the repository root
+widens planning only when the config file itself changes. Give the config a
+directory of its own, such as `.github/codeql/`: a config directly under
+`.github/` widens planning for every workflow change.
 
 **Languages are discovered per run, never configured.** A hard-coded
 language list is wrong as soon as a repository grows a language, and
