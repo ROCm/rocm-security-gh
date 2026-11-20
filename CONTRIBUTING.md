@@ -16,6 +16,12 @@ before opening a pull request here.
    reviewers use the "Technical Details" and "Test Plan"/"Test Result"
    sections to understand *why* a change was made and how it was verified.
 
+## Design decisions
+
+A change that adds a scanner or scan target, changes which changes trigger a
+scan or which findings fail a run, or runs code from the scanned repository
+needs an RFC in [`docs/rfcs/`](docs/rfcs/README.md). Open it with the change
+or before it.
 ## Changelog
 
 Repositories that call these workflows read [CHANGELOG.md](CHANGELOG.md)
