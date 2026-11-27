@@ -630,25 +630,48 @@ def validate_config_path(config_path: str, checkout_root: Path) -> str:
     return normalized
 
 
+def _named_query_ids(entry: object) -> frozenset[str]:
+    """Return the query ids an `include` or `exclude` filter names by `id`.
+
+    E.g. `{exclude: {id: [a, b]}}` names `a` and `b`, while
+    `{include: {tags contain: security}}` names none.
+    """
+    if not isinstance(entry, Mapping):
+        return frozenset()
+    ids: set[str] = set()
+    for action in ("include", "exclude"):
+        criteria = entry.get(action)
+        if not isinstance(criteria, Mapping):
+            continue
+        value = criteria.get("id")
+        if isinstance(value, str):
+            ids.add(value)
+        elif isinstance(value, list):
+            ids.update(item for item in value if isinstance(item, str))
+    return frozenset(ids)
+
+
 def _merge_query_filters(repository_filters: list[object]) -> list[object]:
-    """Return the baseline's query filters combined with the repository's.
+    """Return the repository's query filters followed by the baseline's.
 
     CodeQL applies filters in order: the first one decides whether
-    queries are included or excluded by default, and a later filter
-    overrides an earlier one. The repository's whole list follows the
-    baseline's, so every repository filter can override it. When the
-    repository's list opens with an `include` (only the queries it
-    names), that filter is also placed ahead of the baseline's so it
-    still decides the default; repeating it changes nothing else. E.g.
-    `[{include: {id: actions/unpinned-tag}}]` becomes
-    `[include unpinned-tag, exclude unpinned-tag, include unpinned-tag]`,
-    which runs that query alone.
+    queries are included or excluded by default, and the last filter
+    matching a query decides it. The repository's list is kept as
+    written, so its first filter still decides the default. Each
+    baseline filter goes last, so a broad repository `include` such as
+    `{tags contain: security}` cannot undo it, and is dropped when the
+    repository names its query by `id`: that repository decides the
+    query itself. E.g. `[{include: {tags contain: security}}]` becomes
+    `[include security, exclude actions/unpinned-tag]`, while
+    `[{include: {id: actions/unpinned-tag}}]` is kept as is.
     """
-    baseline = [dict(entry) for entry in BASELINE_QUERY_FILTERS]
-    first = repository_filters[0] if repository_filters else None
-    if isinstance(first, Mapping) and "include" in first:
-        return [first, *baseline, *repository_filters]
-    return [*baseline, *repository_filters]
+    named = frozenset().union(*map(_named_query_ids, repository_filters))
+    baseline = [
+        dict(entry)
+        for entry in BASELINE_QUERY_FILTERS
+        if not _named_query_ids(entry) & named
+    ]
+    return [*repository_filters, *baseline]
 
 
 def build_codeql_config(config_path: str, checkout_root: Path) -> str:

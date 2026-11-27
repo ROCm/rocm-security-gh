@@ -297,12 +297,13 @@ dangerous sink several functions away from where it entered.
   - Its `queries:` and `packs:` run in addition to `security-extended`;
     they cannot replace the suite, though its `query-filters` can still
     exclude suite queries.
-  - Its `query-filters` follow the baseline's, so they can override them.
-    To turn `actions/unpinned-tag` back on, add
-    `- include: {id: actions/unpinned-tag}` after an `exclude` entry.
-    A list that opens with an `include` keeps its CodeQL meaning, only
-    the queries it names: that first filter is also placed ahead of the
-    baseline's, so it decides the default.
+  - Its `query-filters` are kept as written and the baseline's go last,
+    so the repository's first filter still decides the default and a
+    broad `include`, such as `{tags contain: security}`, does not turn
+    `actions/unpinned-tag` back on. A repository that names
+    `actions/unpinned-tag` by `id` in any `include` or `exclude` decides
+    that query itself, and the baseline's filter is left out: add
+    `- include: {id: actions/unpinned-tag}` to turn it back on.
   - Every other key, such as `paths-ignore`, is the repository's.
 - A query committed to the repository is referenced as
   `- uses: ./.github/codeql/<pack>/<Query>.ql` and resolves its

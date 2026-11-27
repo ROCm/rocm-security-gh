@@ -19,6 +19,14 @@ ones:
 
 ## [Unreleased]
 
+### Fixed
+
+- A `codeql_config_path` config with a broad `include` in its
+  `query-filters`, such as `{tags contain: security}`, turned the
+  baseline's excluded `actions/unpinned-tag` query back on. The baseline's
+  filters now follow the repository's, and only a repository that names
+  `actions/unpinned-tag` by `id` decides that query.
+
 ## [v1.0.9] - 2026-11-18
 
 ### Scanner versions
