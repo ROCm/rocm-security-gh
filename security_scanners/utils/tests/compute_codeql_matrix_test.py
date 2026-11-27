@@ -736,7 +736,7 @@ class BuildCodeqlConfigTest(unittest.TestCase):
         )
         self.assertEqual(config["query-filters"], [_BASELINE_FILTER])
 
-    def test_repository_filters_follow_the_baseline_so_they_override_it(self):
+    def test_naming_the_baseline_query_drops_the_baseline_filter(self):
         config = self._build(
             "query-filters:\n"
             "  - exclude:\n"
@@ -747,9 +747,25 @@ class BuildCodeqlConfigTest(unittest.TestCase):
         self.assertEqual(
             config["query-filters"],
             [
-                _BASELINE_FILTER,
                 {"exclude": {"id": "rust/cleartext-logging"}},
                 {"include": {"id": "actions/unpinned-tag"}},
+            ],
+        )
+
+    def test_naming_the_baseline_query_in_an_id_list_drops_the_baseline_filter(
+        self,
+    ):
+        config = self._build(
+            "query-filters:\n"
+            "  - exclude:\n"
+            "      id:\n"
+            "        - rust/cleartext-logging\n"
+            "        - actions/unpinned-tag\n"
+        )
+        self.assertEqual(
+            config["query-filters"],
+            [
+                {"exclude": {"id": ["rust/cleartext-logging", "actions/unpinned-tag"]}},
             ],
         )
 
@@ -765,18 +781,34 @@ class BuildCodeqlConfigTest(unittest.TestCase):
             config["query-filters"],
             [
                 {"include": {"tags contain": "security"}},
-                _BASELINE_FILTER,
-                {"include": {"tags contain": "security"}},
                 {"exclude": {"id": "py/clear-text-logging-sensitive-data"}},
+                _BASELINE_FILTER,
             ],
         )
 
-    def test_a_leading_include_overrides_the_baseline(self):
+    def test_a_broad_include_after_an_exclude_keeps_the_baseline_last(self):
+        config = self._build(
+            "query-filters:\n"
+            "  - exclude:\n"
+            "      id: rust/cleartext-logging\n"
+            "  - include:\n"
+            "      tags contain: security\n"
+        )
+        self.assertEqual(
+            config["query-filters"],
+            [
+                {"exclude": {"id": "rust/cleartext-logging"}},
+                {"include": {"tags contain": "security"}},
+                _BASELINE_FILTER,
+            ],
+        )
+
+    def test_a_leading_include_of_the_baseline_query_runs_it_alone(self):
         include = {"include": {"id": "actions/unpinned-tag"}}
         config = self._build(
             "query-filters:\n  - include:\n      id: actions/unpinned-tag\n"
         )
-        self.assertEqual(config["query-filters"], [include, _BASELINE_FILTER, include])
+        self.assertEqual(config["query-filters"], [include])
 
     def test_empty_query_filters_get_the_baseline(self):
         config = self._build("query-filters: []\n")
